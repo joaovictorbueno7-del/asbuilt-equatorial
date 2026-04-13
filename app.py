@@ -267,27 +267,40 @@ def agente1_consultar(pergunta: str, groq_key: str) -> str:
 
     import re
 
-    # Extrai todos os termos incluindo siglas/códigos (CE3, CE4, M-01, NT.00018)
-    termos_raw = set(pergunta.lower().split()) - {"de","a","o","e","do","da","em","com","para","que","é","um","uma","os","as",""}
-    siglas = set(re.findall(r'[A-Za-z]{1,3}[\-]?[0-9]{1,3}', pergunta))  # CE3, CE4, M-01, etc
-    termos = termos_raw | {s.lower() for s in siglas}
+    # Extrai siglas e códigos da pergunta (CE3, CE4, CE1A, B3CE, M-01, etc)
+    siglas = re.findall(r'[A-Za-z]{1,4}[\-]?[0-9A-Za-z]{1,4}', pergunta)
+    siglas_lower = [s.lower() for s in siglas]
+    termos_raw = set(pergunta.lower().split()) - {"de","a","o","e","do","da","em","com","para","que","é","um","uma","os","as","voce","você","quero","me","da","qual","o","poste"}
+    termos = termos_raw | set(siglas_lower)
 
     def score(chunk):
         txt = chunk["texto"].lower()
+        txt_orig = chunk["texto"]
         pontos = 0
-        for t in termos:
+
+        # Peso máximo: chunk que tem EXATAMENTE "LISTA XX - Materiais – Estrutura CE4"
+        for sig in siglas:
+            if f"estrutura {sig.upper()}" in txt_orig or f"– Estrutura {sig}" in txt_orig or f"- Estrutura {sig}" in txt_orig:
+                pontos += 50  # match direto na lista de materiais
+            elif re.search(r'\b' + re.escape(sig.lower()) + r'\b', txt):
+                pontos += 10  # match de sigla isolada
+
+        # Bônus para estrutura de lista/tabela de materiais
+        if "lista" in txt and "material" in txt:
+            pontos += 15
+        if any(k in txt for k in ["ref.", "unid.", "quant.", "descrição", "código do material", "código sap"]):
+            pontos += 10
+        if " | " in txt_orig:
+            pontos += 5
+
+        # Termos gerais
+        for t in termos_raw:
             if t in txt:
-                # Peso 5 para match exato de sigla/código (ex: "ce3", "ce4")
-                if len(t) <= 5 and re.search(r'\b' + re.escape(t) + r'\b', txt):
-                    pontos += 5
-                else:
-                    pontos += 1
-        # Bônus para chunks com estrutura de tabela/lista
-        if any(k in txt for k in [" | ", "lista", "tabela", "ref.", "material", "descrição", "quant", "código"]):
-            pontos += 3
+                pontos += 1
+
         return pontos
 
-    ordenados = sorted(chunks, key=score, reverse=True)[:12]
+    ordenados = sorted(chunks, key=score, reverse=True)[:15]
     contexto = ""
     for c in ordenados:
         pag = f" (pág. {c.get('pagina','')})" if c.get('pagina') else ""
