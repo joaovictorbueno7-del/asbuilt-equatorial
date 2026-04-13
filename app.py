@@ -3,6 +3,7 @@ import os
 import json
 import io
 import pdfplumber
+import pandas as pd
 from groq import Groq
 from datetime import datetime
 from memoria import normalizar_query, buscar_memorias_relevantes, salvar_conversa, criar_tabela_se_necessario
@@ -17,6 +18,7 @@ st.set_page_config(
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 MODEL = "llama-3.3-70b-versatile"
 NORMAS_FILE = "normas_base.json"
+REGRAS_FILE = "regras_servicos.json"
 
 # ─── Funções base ────────────────────────────────────────────────────────────────
 def get_groq(key=None):
@@ -350,6 +352,157 @@ Estruturas detectadas: {', '.join(estruturas) if estruturas else 'nenhuma espec�
 
     return resposta
 
+# ─── AGENTE EXCEL — Análise de Planilha As-built ─────────────────────────────────
+def regras_load() -> dict:
+    """Carrega regras_servicos.json."""
+    if os.path.exists(REGRAS_FILE):
+        with open(REGRAS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"regras": [], "ignorar_classificacoes": []}
+
+def ler_planilha(file) -> pd.DataFrame:
+    """Lê a planilha Excel e retorna DataFrame padronizado."""
+    df = pd.read_excel(file, dtype=str)
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    df = df.fillna("")
+    return df
+
+def detectar_colunas(df: pd.DataFrame) -> dict:
+    """Detecta automaticamente quais colunas correspondem a cada campo."""
+    mapeamento = {}
+    cols = list(df.columns)
+
+    candidatos = {
+        "tipo_item": ["tipo_item", "tipo item", "tipodeitem", "tipo"],
+        "codigo":    ["código", "codigo", "cod", "cod.", "code"],
+        "descricao": ["descrição", "descricao", "desc", "description", "nome"],
+        "tipo":      ["tipo", "od", "odi/odd"],
+        "quantidade":["quantidade", "quant", "qtd", "qtde", "qt"],
+        "classificacao": ["classificação", "classificacao", "class", "classif"],
+        "grupo":     ["grupo", "group", "categoria"],
+    }
+
+    for campo, alternativas in candidatos.items():
+        for col in cols:
+            col_lower = col.lower()
+            if any(alt in col_lower for alt in alternativas):
+                if campo not in mapeamento:
+                    mapeamento[campo] = col
+                break
+
+    return mapeamento
+
+def analisar_planilha(df: pd.DataFrame, regras_data: dict) -> dict:
+    """
+    Analisa a planilha contra as regras de UP x Serviço.
+    Retorna relatório com conformidades e não conformidades.
+    """
+    mapa = detectar_colunas(df)
+    regras = regras_data.get("regras", [])
+    ignorar = [i.upper() for i in regras_data.get("ignorar_classificacoes", [])]
+
+    col_tipo_item   = mapa.get("tipo_item", "")
+    col_tipo        = mapa.get("tipo", "")
+    col_classificao = mapa.get("classificacao", "")
+    col_codigo      = mapa.get("codigo", "")
+    col_descricao   = mapa.get("descricao", "")
+    col_quantidade  = mapa.get("quantidade", "")
+
+    # Separa UPs e Serviços
+    ups = []
+    servicos = []
+
+    for _, row in df.iterrows():
+        tipo_item = row.get(col_tipo_item, "").strip().upper() if col_tipo_item else ""
+        if tipo_item == "UP":
+            ups.append(row)
+        elif tipo_item in ("SERVIÇO", "SERVICO", "SERV"):
+            servicos.append(row)
+
+    # Se não tiver coluna tipo_item, tenta inferir pela existência de código de serviço
+    if not ups and not servicos:
+        # Considera todas as linhas com CLASSIFICAÇÃO preenchida como UP
+        for _, row in df.iterrows():
+            if row.get(col_classificao, "").strip():
+                ups.append(row)
+
+    # Monta conjunto de serviços presentes na planilha
+    codigos_servicos_presentes = set()
+    for s in servicos:
+        cod = s.get(col_codigo, "").strip()
+        if cod:
+            codigos_servicos_presentes.add(cod)
+
+    # Monta conjunto de tipos (ODI/ODD) por UP
+    nao_conformidades = []
+    conformes = []
+    ups_sem_regra = []
+    resumo_ups = {}  # classificação → {ODI: n, ODD: n}
+
+    for up_row in ups:
+        classif = up_row.get(col_classificao, "").strip().upper()
+        tipo_op = up_row.get(col_tipo, "").strip().upper()
+        codigo_up = up_row.get(col_codigo, "").strip()
+        desc_up   = up_row.get(col_descricao, "").strip()
+
+        if not classif or classif in ignorar:
+            continue
+
+        # Acumula para resumo
+        if classif not in resumo_ups:
+            resumo_ups[classif] = {"ODI": 0, "ODD": 0}
+        if tipo_op in ("ODI", "ODD"):
+            resumo_ups[classif][tipo_op] += 1
+
+        # Busca regras aplicáveis
+        regras_encontradas = [
+            r for r in regras
+            if r["classificacao_up"].upper() == classif
+            and r["tipo"].upper() == tipo_op
+        ]
+
+        if not regras_encontradas:
+            if tipo_op in ("ODI", "ODD"):
+                ups_sem_regra.append({
+                    "classificacao": classif,
+                    "tipo": tipo_op,
+                    "codigo": codigo_up,
+                    "descricao": desc_up
+                })
+            continue
+
+        # Verifica se os serviços exigidos estão na planilha
+        for regra in regras_encontradas:
+            cod_exigido = regra["servico_codigo"]
+            desc_exigida = regra["servico_descricao"]
+
+            if cod_exigido in codigos_servicos_presentes:
+                conformes.append(f"{classif} ({tipo_op}) → {desc_exigida} ✅")
+            else:
+                nao_conformidades.append({
+                    "up_classificacao": classif,
+                    "up_codigo": codigo_up,
+                    "up_descricao": desc_up,
+                    "tipo_operacao": tipo_op,
+                    "servico_exigido_codigo": cod_exigido,
+                    "servico_exigido_descricao": desc_exigida,
+                    "problema": f"Serviço '{desc_exigida}' (cód. {cod_exigido}) exigido para {classif} {tipo_op} não encontrado na planilha.",
+                    "como_corrigir": f"Adicione o serviço '{desc_exigida}' (código {cod_exigido}) na planilha."
+                })
+
+    return {
+        "aprovado": len(nao_conformidades) == 0,
+        "total_ups": len(ups),
+        "total_servicos": len(servicos),
+        "total_nao_conformidades": len(nao_conformidades),
+        "nao_conformidades": nao_conformidades,
+        "conformes": conformes,
+        "ups_sem_regra": ups_sem_regra,
+        "resumo_ups": resumo_ups,
+        "colunas_detectadas": mapa,
+        "codigos_servicos_presentes": list(codigos_servicos_presentes),
+    }
+
 # ─── INTERFACE ────────────────────────────────────────────────────────────────────
 # Session state
 for k, v in [("step", 1), ("report", None), ("asbuilt_bytes", None), ("asbuilt_name", ""), ("chat_hist", [])]:
@@ -395,7 +548,141 @@ st.title("⚡ Análise de As-built — Equatorial")
 st.caption("5 agentes especializados analisam seu documento automaticamente")
 
 # Abas principais
-aba_analise, aba_normas = st.tabs(["📄 Análise de As-built", "💬 Consultar Normas (Agente 1)"])
+aba_analise, aba_excel, aba_normas = st.tabs(["📄 Análise de As-built (PDF)", "📊 Análise de Planilha (Excel)", "💬 Consultar Normas (Agente 1)"])
+
+# ═══════ ABA EXCEL — Análise de Planilha ═════════════════════════════════════════
+with aba_excel:
+    st.header("📊 Análise de Planilha As-built")
+    st.caption("Faça upload da planilha Excel e verifique se todos os serviços exigidos estão presentes para cada UP.")
+
+    regras_data = regras_load()
+    n_regras = len(regras_data.get("regras", []))
+
+    if n_regras == 0:
+        st.error("⚠️ Base de regras (regras_servicos.json) não encontrada ou vazia.")
+    else:
+        st.info(f"✅ Base de regras carregada — **{n_regras} regras** de UP × Serviço")
+
+        # Mostrar regras cadastradas
+        with st.expander("📋 Ver regras cadastradas"):
+            regras_list = regras_data.get("regras", [])
+            df_regras = pd.DataFrame(regras_list)
+            if not df_regras.empty:
+                st.dataframe(df_regras, use_container_width=True)
+            ignorados = regras_data.get("ignorar_classificacoes", [])
+            if ignorados:
+                st.caption(f"Classificações ignoradas: {', '.join(ignorados)}")
+
+        st.divider()
+
+        arquivo_excel = st.file_uploader(
+            "Selecione a planilha (.xlsx ou .xls)",
+            type=["xlsx", "xls"],
+            key="excel_upload"
+        )
+
+        if arquivo_excel:
+            try:
+                df_planilha = ler_planilha(arquivo_excel)
+                st.success(f"✅ Planilha carregada — {len(df_planilha)} linhas, {len(df_planilha.columns)} colunas")
+
+                mapa = detectar_colunas(df_planilha)
+
+                with st.expander("🔍 Colunas detectadas"):
+                    for campo, col in mapa.items():
+                        st.markdown(f"- **{campo}** → `{col}`")
+                    cols_nao_mapeadas = [c for c in df_planilha.columns if c not in mapa.values()]
+                    if cols_nao_mapeadas:
+                        st.caption(f"Colunas não mapeadas: {', '.join(cols_nao_mapeadas)}")
+
+                with st.expander("👁️ Preview da planilha (primeiras 20 linhas)"):
+                    st.dataframe(df_planilha.head(20), use_container_width=True)
+
+                if st.button("▶️ Analisar Planilha", type="primary", key="btn_analisar_excel"):
+                    with st.spinner("Analisando..."):
+                        resultado = analisar_planilha(df_planilha, regras_data)
+
+                    # Resultado geral
+                    if resultado["aprovado"]:
+                        st.success("# ✅ PLANILHA APROVADA — Todos os serviços exigidos estão presentes!")
+                    else:
+                        st.error(f"# ❌ PLANILHA REPROVADA — {resultado['total_nao_conformidades']} serviço(s) faltando!")
+
+                    # Métricas
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("UPs analisadas", resultado["total_ups"])
+                    c2.metric("Serviços na planilha", resultado["total_servicos"])
+                    c3.metric("Não conformidades", resultado["total_nao_conformidades"])
+                    c4.metric("Itens conformes", len(resultado["conformes"]))
+
+                    st.divider()
+
+                    # Resumo por classificação
+                    if resultado["resumo_ups"]:
+                        with st.expander("📊 Resumo por classificação de UP"):
+                            resumo_df = pd.DataFrame([
+                                {"Classificação": k, "ODI (instalação)": v["ODI"], "ODD (retirada)": v["ODD"]}
+                                for k, v in resultado["resumo_ups"].items()
+                            ])
+                            st.dataframe(resumo_df, use_container_width=True)
+
+                    # Não conformidades
+                    ncs = resultado["nao_conformidades"]
+                    if ncs:
+                        st.subheader("❌ Serviços Faltando")
+                        for i, nc in enumerate(ncs, 1):
+                            with st.expander(f"**{i}. {nc['up_classificacao']} ({nc['tipo_operacao']}) — falta: {nc['servico_exigido_descricao']}**", expanded=True):
+                                col_a, col_b = st.columns(2)
+                                with col_a:
+                                    st.markdown(f"**UP:** `{nc['up_codigo']}` — {nc['up_descricao']}")
+                                    st.markdown(f"**Operação:** `{nc['tipo_operacao']}`")
+                                    st.markdown(f"**Serviço exigido:** `{nc['servico_exigido_codigo']}` — {nc['servico_exigido_descricao']}")
+                                with col_b:
+                                    st.warning(f"**Como corrigir:** {nc['como_corrigir']}")
+
+                    # Conformes
+                    conformes = resultado["conformes"]
+                    if conformes:
+                        with st.expander(f"✅ Itens conformes ({len(conformes)})"):
+                            for item in conformes:
+                                st.markdown(f"- {item}")
+
+                    # UPs sem regra cadastrada
+                    sem_regra = resultado["ups_sem_regra"]
+                    if sem_regra:
+                        with st.expander(f"⚠️ UPs sem regra cadastrada ({len(sem_regra)}) — não verificadas"):
+                            for up in sem_regra:
+                                st.markdown(f"- **{up['classificacao']}** ({up['tipo']}) — `{up['codigo']}` {up['descricao']}")
+                            st.caption("Cadastre regras para essas classificações no arquivo regras_servicos.json")
+
+                    # Download relatório
+                    st.divider()
+                    linhas_rel = f"RELATÓRIO DE ANÁLISE DE PLANILHA — EQUATORIAL\n{'='*60}\n"
+                    linhas_rel += f"Status: {'APROVADA' if resultado['aprovado'] else 'REPROVADA'}\n"
+                    linhas_rel += f"Arquivo: {arquivo_excel.name}\n"
+                    linhas_rel += f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
+                    linhas_rel += f"UPs analisadas: {resultado['total_ups']}\n"
+                    linhas_rel += f"Serviços na planilha: {resultado['total_servicos']}\n"
+                    linhas_rel += f"Não conformidades: {resultado['total_nao_conformidades']}\n\n"
+                    linhas_rel += "NÃO CONFORMIDADES:\n"
+                    for i, nc in enumerate(ncs, 1):
+                        linhas_rel += f"\n{i}. {nc['up_classificacao']} ({nc['tipo_operacao']})\n"
+                        linhas_rel += f"   Serviço faltando: {nc['servico_exigido_descricao']} ({nc['servico_exigido_codigo']})\n"
+                        linhas_rel += f"   Correção: {nc['como_corrigir']}\n"
+                    if not ncs:
+                        linhas_rel += "Nenhuma não conformidade encontrada.\n"
+
+                    st.download_button(
+                        "⬇️ Baixar Relatório (.txt)",
+                        data=linhas_rel,
+                        file_name=f"relatorio_excel_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                        mime="text/plain",
+                        use_container_width=True
+                    )
+
+            except Exception as e:
+                st.error(f"Erro ao ler a planilha: {e}")
+                st.caption("Verifique se o arquivo é um Excel válido (.xlsx ou .xls)")
 
 # ═══════ ABA NORMAS — Chat com Agente 1 ══════════════════════════════════════════
 with aba_normas:

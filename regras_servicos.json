@@ -1,0 +1,67 @@
+{
+  "versao": "1.0",
+  "descricao": "Base de regras: UP (material) x Serviço correspondente",
+  "regras": [
+    {
+      "classificacao_up": "POSTE CONCRETO",
+      "tipo": "ODI",
+      "servico_codigo": "5020000092",
+      "servico_descricao": "INST POSTE CONCRETO ATE 14M LM",
+      "observacao": "Todo poste concreto instalado exige este serviço"
+    },
+    {
+      "classificacao_up": "POSTE CONCRETO",
+      "tipo": "ODD",
+      "servico_codigo": "5020000093",
+      "servico_descricao": "RET POSTE CONCRETO ATE 14M LM",
+      "observacao": "Todo poste concreto retirado exige este serviço"
+    },
+    {
+      "classificacao_up": "ESTRUTURA SECUNDARIA",
+      "tipo": "ODI",
+      "servico_codigo": "5021100014",
+      "servico_descricao": "INST ESTRUTURA SECUNDARIA LM",
+      "observacao": "Estruturas secundárias instaladas: S1.1, S1I, S3I, S4I, SI-M, etc."
+    },
+    {
+      "classificacao_up": "ESTRUTURA SECUNDARIA",
+      "tipo": "ODD",
+      "servico_codigo": "5021100015",
+      "servico_descricao": "RET ESTRUTURA SECUNDARIA LM",
+      "observacao": "Estruturas secundárias retiradas: S1.4, S3.4, S4.4, etc."
+    },
+    {
+      "classificacao_up": "ESTRUTURA MT U1",
+      "tipo": "ODI",
+      "servico_codigo": "5031200320",
+      "servico_descricao": "INST ESTR PRI 1F SUSP/PAS DP S/CRUZ LV",
+      "observacao": "Estrutura primária U1 instalada"
+    },
+    {
+      "classificacao_up": "ESTRUTURA MT U1",
+      "tipo": "ODD",
+      "servico_codigo": "5031200319",
+      "servico_descricao": "RET ESTR PRI 1F SUSP/PAS SP S/CRUZ LV",
+      "observacao": "Estrutura primária U1 retirada"
+    },
+    {
+      "classificacao_up": "ESTRUTURA MT U1",
+      "tipo": "ODI",
+      "servico_codigo": "5031200338",
+      "servico_descricao": "TURMA LV INST POSTE ESTRUT PRIMARIA LV",
+      "observacao": "Apoio de turma para instalação de poste com estrutura primária"
+    },
+    {
+      "classificacao_up": "ESTRUTURA MT U1",
+      "tipo": "ODD",
+      "servico_codigo": "5031200339",
+      "servico_descricao": "TURMA LV RET POSTE ESTRUT PRIMARIA LV",
+      "observacao": "Apoio de turma para retirada de poste com estrutura primária"
+    }
+  ],
+  "ignorar_classificacoes": [
+    "Outros",
+    "Isolador (Nível 1)"
+  ],
+  "nota": "Classificações em 'ignorar' não exigem serviço correspondente"
+}
