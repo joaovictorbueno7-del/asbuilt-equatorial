@@ -265,26 +265,33 @@ def agente1_consultar(pergunta: str, groq_key: str) -> str:
     if not chunks:
         return "Nenhuma norma carregada na base. Carregue as normas primeiro."
 
-    # Extrai termos relevantes da pergunta — inclui siglas e códigos (CE4, M-01, etc)
     import re
+
+    # Extrai todos os termos incluindo siglas/códigos (CE3, CE4, M-01, NT.00018)
     termos_raw = set(pergunta.lower().split()) - {"de","a","o","e","do","da","em","com","para","que","é","um","uma","os","as",""}
-    # Adiciona termos originais (com maiúsculas) para pegar siglas como CE4, M-01
-    siglas = set(re.findall(r'[A-Z][A-Z0-9\-]{1,}', pergunta))
+    siglas = set(re.findall(r'[A-Za-z]{1,3}[\-]?[0-9]{1,3}', pergunta))  # CE3, CE4, M-01, etc
     termos = termos_raw | {s.lower() for s in siglas}
 
     def score(chunk):
         txt = chunk["texto"].lower()
-        # Peso maior para chunks que contêm a sigla/código exato (ex: "ce4", "lista 26")
-        base = sum(1 for t in termos if t in txt)
-        # Bônus para chunks com listas/tabelas (indicam dados diretos)
-        if any(k in txt for k in ["lista", "tabela", "ref.", "código", "material", "descrição", "quant"]):
-            base += 2
-        return base
+        pontos = 0
+        for t in termos:
+            if t in txt:
+                # Peso 5 para match exato de sigla/código (ex: "ce3", "ce4")
+                if len(t) <= 5 and re.search(r'\b' + re.escape(t) + r'\b', txt):
+                    pontos += 5
+                else:
+                    pontos += 1
+        # Bônus para chunks com estrutura de tabela/lista
+        if any(k in txt for k in [" | ", "lista", "tabela", "ref.", "material", "descrição", "quant", "código"]):
+            pontos += 3
+        return pontos
 
-    ordenados = sorted(chunks, key=score, reverse=True)[:10]
+    ordenados = sorted(chunks, key=score, reverse=True)[:12]
     contexto = ""
     for c in ordenados:
-        contexto += f"\n--- Fonte: {c['fonte']} ---\n{c['texto']}\n"
+        pag = f" (pág. {c.get('pagina','')})" if c.get('pagina') else ""
+        contexto += f"\n--- Fonte: {c['fonte']}{pag} ---\n{c['texto']}\n"
 
     system = """Você é o Agente 1 — Especialista em Normas Técnicas da Equatorial Energia.
 
