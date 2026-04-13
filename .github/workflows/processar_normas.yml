@@ -1,0 +1,35 @@
+name: Processar Normas PDF
+
+on:
+  push:
+    paths:
+      - 'normas_pdfs/**'
+  workflow_dispatch:
+
+jobs:
+  processar:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependências
+        run: pip install pdfplumber
+
+      - name: Processar PDFs das normas
+        run: python processar_normas.py
+
+      - name: Commit da base de normas
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add normas_base.json
+          git diff --cached --quiet || git commit -m "Auto: atualiza base de normas"
+          git push
