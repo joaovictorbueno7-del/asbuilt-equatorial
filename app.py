@@ -5,6 +5,7 @@ import io
 import pdfplumber
 from groq import Groq
 from datetime import datetime
+from memoria import normalizar_query, buscar_memorias_relevantes, salvar_conversa, criar_tabela_se_necessario
 
 # ─── Configuração ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -267,67 +268,87 @@ def agente1_consultar(pergunta: str, groq_key: str) -> str:
 
     import re
 
-    # Extrai siglas e códigos da pergunta (CE3, CE4, CE1A, B3CE, M-01, etc)
-    siglas = re.findall(r'[A-Za-z]{1,4}[\-]?[0-9A-Za-z]{1,4}', pergunta)
-    siglas_lower = [s.lower() for s in siglas]
-    termos_raw = set(pergunta.lower().split()) - {"de","a","o","e","do","da","em","com","para","que","é","um","uma","os","as","voce","você","quero","me","da","qual","o","poste"}
-    termos = termos_raw | set(siglas_lower)
+    # 1. Normaliza a query e extrai estruturas (CE4, ce4, estrutura CE4 → ["CE4"])
+    _, estruturas = normalizar_query(pergunta)
+
+    # Extrai siglas brutas também
+    siglas_brutas = re.findall(r'[A-Za-z]{1,4}[\-]?[0-9A-Za-z]{1,4}', pergunta)
+    todas_siglas = list(set(estruturas + [s.upper() for s in siglas_brutas]))
+
+    termos_raw = set(pergunta.lower().split()) - {
+        "de","a","o","e","do","da","em","com","para","que","é","um","uma",
+        "os","as","voce","você","quero","me","qual","poste","material","estrutura",
+        "me","diga","liste","quais","são","os","materiais","da","preciso"
+    }
 
     def score(chunk):
         txt = chunk["texto"].lower()
         txt_orig = chunk["texto"]
         pontos = 0
 
-        # Peso máximo: chunk que tem EXATAMENTE "LISTA XX - Materiais – Estrutura CE4"
-        for sig in siglas:
-            if f"estrutura {sig.upper()}" in txt_orig or f"– Estrutura {sig}" in txt_orig or f"- Estrutura {sig}" in txt_orig:
-                pontos += 50  # match direto na lista de materiais
+        # Peso máximo: chunk com "Materiais – Estrutura CE4" (lista direta)
+        for sig in todas_siglas:
+            sig_up = sig.upper()
+            if (f"– Estrutura {sig_up}" in txt_orig or
+                f"- Estrutura {sig_up}" in txt_orig or
+                f"Estrutura {sig_up}\n" in txt_orig or
+                f"LISTA" in txt_orig and f"Estrutura {sig_up}" in txt_orig):
+                pontos += 50
             elif re.search(r'\b' + re.escape(sig.lower()) + r'\b', txt):
-                pontos += 10  # match de sigla isolada
+                pontos += 10
 
-        # Bônus para estrutura de lista/tabela de materiais
+        # Bônus para chunks com listas de materiais
         if "lista" in txt and "material" in txt:
             pontos += 15
-        if any(k in txt for k in ["ref.", "unid.", "quant.", "descrição", "código do material", "código sap"]):
-            pontos += 10
+        if any(k in txt for k in ["ref.", "unid.", "quant.", "código do material", "código sap"]):
+            pontos += 12
         if " | " in txt_orig:
             pontos += 5
 
-        # Termos gerais
         for t in termos_raw:
-            if t in txt:
+            if len(t) > 2 and t in txt:
                 pontos += 1
 
         return pontos
 
     ordenados = sorted(chunks, key=score, reverse=True)[:15]
-    contexto = ""
+    contexto_normas = ""
     for c in ordenados:
         pag = f" (pág. {c.get('pagina','')})" if c.get('pagina') else ""
-        contexto += f"\n--- Fonte: {c['fonte']}{pag} ---\n{c['texto']}\n"
+        contexto_normas += f"\n--- {c['fonte']}{pag} ---\n{c['texto']}\n"
+
+    # 2. Busca memórias de conversas anteriores sobre as mesmas estruturas
+    contexto_memoria = buscar_memorias_relevantes(pergunta, estruturas)
 
     system = """Você é o Agente 1 — Especialista em Normas Técnicas da Equatorial Energia.
+Você aprende com cada conversa e fica mais preciso com o tempo.
 
-REGRAS OBRIGATÓRIAS DE RESPOSTA:
-1. SEJA DIRETO E CONCISO. Sem introduções, sem "de acordo com", sem contexto desnecessário.
-2. Se a pergunta pede uma lista de materiais, retorne A LISTA COMPLETA em formato de tabela markdown.
-3. Se encontrar tabelas ou listas nas normas, reproduza-as fielmente com REF, CÓDIGO, DESCRIÇÃO, UNIDADE e QUANTIDADE.
-4. Cite apenas a norma de origem (ex: NT.00018) no final, sem parágrafos explicativos.
-5. Se não encontrar a informação exata, diga em UMA linha: "Não encontrei [X] nas normas disponíveis."
-6. NUNCA adicione disclaimers, sugestões ou parágrafos extras.
+REGRAS OBRIGATÓRIAS:
+1. DIRETO AO PONTO. Sem introduções, sem "de acordo com", sem disclaimers.
+2. Para listas de materiais: reproduza A TABELA COMPLETA em markdown com REF, CÓDIGO (13,8kV / 23,1kV / 34,5kV), DESCRIÇÃO, UNID, QUANT.
+3. Cite a norma de origem no final (ex: *Fonte: NT.00018, pág. 165*).
+4. Se não encontrar: "Não encontrei [X] nas normas disponíveis." — só isso.
+5. Use o histórico de conversas anteriores para melhorar sua resposta se disponível.
+6. Entenda variações: CE4 = ce4 = Estrutura CE4 = estrutura ce-4 = CE 4.
 
-Formato ideal para listas de materiais:
-| REF | CÓDIGO | DESCRIÇÃO | UN | QT |
-|-----|--------|-----------|----|----|
-| ... | ...    | ...       | ...| ...|
-*Fonte: NT.XXXXX*"""
+Formato de tabela:
+| REF | CÓDIGO 13,8kV | CÓDIGO 23,1kV | CÓDIGO 34,5kV | DESCRIÇÃO | UN | QT |
+|-----|--------------|--------------|--------------|-----------|----|----|"""
 
     user = f"""Pergunta: {pergunta}
+Estruturas detectadas: {', '.join(estruturas) if estruturas else 'nenhuma específica'}
 
-Trechos das normas:
-{contexto[:7000]}"""
+{('=== HISTÓRICO RELEVANTE ===\n' + contexto_memoria) if contexto_memoria else ''}
 
-    return call_llm(system, user, groq_key)
+=== NORMAS ===
+{contexto_normas[:7000]}"""
+
+    resposta = call_llm(system, user, groq_key)
+
+    # 3. Salva essa conversa na memória para aprendizado futuro
+    salvar_conversa(pergunta, resposta, estruturas, util=True)
+
+    return resposta
 
 # ─── INTERFACE ────────────────────────────────────────────────────────────────────
 # Session state
@@ -404,6 +425,32 @@ with aba_normas:
                 st.markdown(resposta)
 
             st.session_state.chat_hist.append({"role": "assistant", "content": resposta})
+            st.session_state["ultima_pergunta"] = pergunta
+            st.session_state["ultima_resposta"] = resposta
+            _, ests = normalizar_query(pergunta)
+            st.session_state["ultimas_estruturas"] = ests
+
+        # Feedback da última resposta
+        if st.session_state.get("ultima_resposta"):
+            col_f1, col_f2, col_f3 = st.columns([1,1,6])
+            with col_f1:
+                if st.button("👍 Útil"):
+                    salvar_conversa(
+                        st.session_state["ultima_pergunta"],
+                        st.session_state["ultima_resposta"],
+                        st.session_state.get("ultimas_estruturas", []),
+                        util=True
+                    )
+                    st.success("Obrigado! Memória atualizada.")
+            with col_f2:
+                if st.button("👎 Errada"):
+                    salvar_conversa(
+                        st.session_state["ultima_pergunta"],
+                        st.session_state["ultima_resposta"],
+                        st.session_state.get("ultimas_estruturas", []),
+                        util=False
+                    )
+                    st.warning("Anotado! O agente vai ignorar essa resposta.")
 
         if st.session_state.chat_hist:
             if st.button("🗑️ Limpar conversa"):
