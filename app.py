@@ -265,29 +265,47 @@ def agente1_consultar(pergunta: str, groq_key: str) -> str:
     if not chunks:
         return "Nenhuma norma carregada na base. Carregue as normas primeiro."
 
-    # Busca os trechos mais relevantes para a pergunta
-    termos = set(pergunta.lower().split()) - {"de","a","o","e","do","da","em","com","para","que","é","um","uma","os","as",""}
+    # Extrai termos relevantes da pergunta — inclui siglas e códigos (CE4, M-01, etc)
+    import re
+    termos_raw = set(pergunta.lower().split()) - {"de","a","o","e","do","da","em","com","para","que","é","um","uma","os","as",""}
+    # Adiciona termos originais (com maiúsculas) para pegar siglas como CE4, M-01
+    siglas = set(re.findall(r'[A-Z][A-Z0-9\-]{1,}', pergunta))
+    termos = termos_raw | {s.lower() for s in siglas}
 
     def score(chunk):
         txt = chunk["texto"].lower()
-        return sum(1 for t in termos if t in txt)
+        # Peso maior para chunks que contêm a sigla/código exato (ex: "ce4", "lista 26")
+        base = sum(1 for t in termos if t in txt)
+        # Bônus para chunks com listas/tabelas (indicam dados diretos)
+        if any(k in txt for k in ["lista", "tabela", "ref.", "código", "material", "descrição", "quant"]):
+            base += 2
+        return base
 
-    ordenados = sorted(chunks, key=score, reverse=True)[:8]
+    ordenados = sorted(chunks, key=score, reverse=True)[:10]
     contexto = ""
     for c in ordenados:
         contexto += f"\n--- Fonte: {c['fonte']} ---\n{c['texto']}\n"
 
     system = """Você é o Agente 1 — Especialista em Normas Técnicas da Equatorial Energia.
-Você conhece profundamente todas as normas técnicas de distribuição elétrica da Equatorial.
-Responda com base EXCLUSIVAMENTE nas normas que você tem na base de conhecimento.
-Seja preciso, cite a norma e o trecho quando possível.
-Se a informação não estiver nas normas, diga claramente que não encontrou nas normas disponíveis.
-Responda em português."""
+
+REGRAS OBRIGATÓRIAS DE RESPOSTA:
+1. SEJA DIRETO E CONCISO. Sem introduções, sem "de acordo com", sem contexto desnecessário.
+2. Se a pergunta pede uma lista de materiais, retorne A LISTA COMPLETA em formato de tabela markdown.
+3. Se encontrar tabelas ou listas nas normas, reproduza-as fielmente com REF, CÓDIGO, DESCRIÇÃO, UNIDADE e QUANTIDADE.
+4. Cite apenas a norma de origem (ex: NT.00018) no final, sem parágrafos explicativos.
+5. Se não encontrar a informação exata, diga em UMA linha: "Não encontrei [X] nas normas disponíveis."
+6. NUNCA adicione disclaimers, sugestões ou parágrafos extras.
+
+Formato ideal para listas de materiais:
+| REF | CÓDIGO | DESCRIÇÃO | UN | QT |
+|-----|--------|-----------|----|----|
+| ... | ...    | ...       | ...| ...|
+*Fonte: NT.XXXXX*"""
 
     user = f"""Pergunta: {pergunta}
 
-Trechos relevantes das normas:
-{contexto[:6000]}"""
+Trechos das normas:
+{contexto[:7000]}"""
 
     return call_llm(system, user, groq_key)
 
