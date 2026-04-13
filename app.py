@@ -5,8 +5,6 @@ import io
 import pdfplumber
 from groq import Groq
 from datetime import datetime
-import chromadb
-from chromadb.utils import embedding_functions
 
 # ─── Configuração ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -17,16 +15,11 @@ st.set_page_config(
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 MODEL = "llama-3.3-70b-versatile"
-CHROMA_PATH = "./normas_db"
+NORMAS_FILE = "normas_base.json"
 
 # ─── Funções base ────────────────────────────────────────────────────────────────
 def get_groq(key=None):
     return Groq(api_key=key or GROQ_API_KEY)
-
-def get_collection():
-    client = chromadb.PersistentClient(path=CHROMA_PATH)
-    ef = embedding_functions.DefaultEmbeddingFunction()
-    return client.get_or_create_collection("normas_equatorial", embedding_function=ef)
 
 def read_pdf(file) -> str:
     text = ""
@@ -35,11 +28,18 @@ def read_pdf(file) -> str:
             text += page.extract_text() or ""
     return text
 
+def normas_load() -> list:
+    if os.path.exists(NORMAS_FILE):
+        with open(NORMAS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+def normas_save(chunks: list):
+    with open(NORMAS_FILE, "w", encoding="utf-8") as f:
+        json.dump(chunks, f, ensure_ascii=False)
+
 def normas_count():
-    try:
-        return get_collection().count()
-    except:
-        return 0
+    return len(normas_load())
 
 def call_llm(system_prompt: str, user_prompt: str, key=None) -> str:
     client = get_groq(key)
@@ -69,43 +69,44 @@ def parse_json(text: str) -> dict:
 
 # ─── Carregamento de normas (feito 1 vez) ────────────────────────────────────────
 def carregar_normas(pdfs, groq_key):
-    col = get_collection()
+    existentes = normas_load()
+    ids_existentes = {c["id"] for c in existentes}
+    novos = []
     for pdf in pdfs:
         texto = read_pdf(pdf)
         chunks = [texto[i:i+2000] for i in range(0, len(texto), 1800)]
         for i, chunk in enumerate(chunks):
             if chunk.strip():
                 doc_id = f"{pdf.name}_{i}"
-                try:
-                    col.add(
-                        documents=[chunk],
-                        ids=[doc_id],
-                        metadatas=[{"fonte": pdf.name, "chunk": i}]
-                    )
-                except Exception:
-                    pass  # chunk já existe, ignora
-    return col.count()
+                if doc_id not in ids_existentes:
+                    novos.append({"id": doc_id, "fonte": pdf.name, "texto": chunk})
+    todos = existentes + novos
+    normas_save(todos)
+    return len(todos)
 
 # ─── AGENTE 1 + 2 — Especialistas em Normas e Serviços (consulta à base) ─────────
 def agentes_1_2_consultar_normas(asbuilt_data: dict) -> str:
-    col = get_collection()
-    total = col.count()
-    if total == 0:
+    chunks = normas_load()
+    if not chunks:
         return "Nenhuma norma carregada na base."
 
-    termos = " ".join(
-        [m.get("descricao", "") for m in asbuilt_data.get("materiais", [])] +
-        [s.get("descricao", "") for s in asbuilt_data.get("servicos", [])]
-    )
-    query = f"normas elétrica rede distribuição materiais serviços {termos}"
+    # Busca por palavras-chave dos materiais/serviços
+    termos = set()
+    for m in asbuilt_data.get("materiais", []):
+        termos.update(m.get("descricao", "").lower().split())
+    for s in asbuilt_data.get("servicos", []):
+        termos.update(s.get("descricao", "").lower().split())
+    termos -= {"de", "a", "o", "e", "do", "da", "em", "com", "para", ""}
 
-    resultados = col.query(query_texts=[query], n_results=min(6, total))
-    trechos = resultados.get("documents", [[]])[0]
-    fontes  = [m.get("fonte", "") for m in resultados.get("metadatas", [[]])[0]]
+    def score(chunk):
+        txt = chunk["texto"].lower()
+        return sum(1 for t in termos if t in txt)
+
+    ordenados = sorted(chunks, key=score, reverse=True)[:6]
 
     contexto = ""
-    for trecho, fonte in zip(trechos, fontes):
-        contexto += f"\n--- Fonte: {fonte} ---\n{trecho}\n"
+    for c in ordenados:
+        contexto += f"\n--- Fonte: {c['fonte']} ---\n{c['texto']}\n"
     return contexto
 
 # ─── AGENTE 3 — Leitor de As-built ───────────────────────────────────────────────
