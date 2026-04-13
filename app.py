@@ -259,9 +259,41 @@ Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}"""
         }
     return resultado
 
+# ─── AGENTE 1 — Consultor de Normas (chat) ───────────────────────────────────────
+def agente1_consultar(pergunta: str, groq_key: str) -> str:
+    chunks = normas_load()
+    if not chunks:
+        return "Nenhuma norma carregada na base. Carregue as normas primeiro."
+
+    # Busca os trechos mais relevantes para a pergunta
+    termos = set(pergunta.lower().split()) - {"de","a","o","e","do","da","em","com","para","que","é","um","uma","os","as",""}
+
+    def score(chunk):
+        txt = chunk["texto"].lower()
+        return sum(1 for t in termos if t in txt)
+
+    ordenados = sorted(chunks, key=score, reverse=True)[:8]
+    contexto = ""
+    for c in ordenados:
+        contexto += f"\n--- Fonte: {c['fonte']} ---\n{c['texto']}\n"
+
+    system = """Você é o Agente 1 — Especialista em Normas Técnicas da Equatorial Energia.
+Você conhece profundamente todas as normas técnicas de distribuição elétrica da Equatorial.
+Responda com base EXCLUSIVAMENTE nas normas que você tem na base de conhecimento.
+Seja preciso, cite a norma e o trecho quando possível.
+Se a informação não estiver nas normas, diga claramente que não encontrou nas normas disponíveis.
+Responda em português."""
+
+    user = f"""Pergunta: {pergunta}
+
+Trechos relevantes das normas:
+{contexto[:6000]}"""
+
+    return call_llm(system, user, groq_key)
+
 # ─── INTERFACE ────────────────────────────────────────────────────────────────────
 # Session state
-for k, v in [("step", 1), ("report", None), ("asbuilt_bytes", None), ("asbuilt_name", "")]:
+for k, v in [("step", 1), ("report", None), ("asbuilt_bytes", None), ("asbuilt_name", ""), ("chat_hist", [])]:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -303,155 +335,178 @@ with st.sidebar:
 st.title("⚡ Análise de As-built — Equatorial")
 st.caption("5 agentes especializados analisam seu documento automaticamente")
 
-# Indicador de etapas
-c1, c2, c3 = st.columns(3)
-etapas = [("📄 Upload", 1), ("⚙️ Análise dos Agentes", 2), ("📋 Relatório Final", 3)]
-for col, (nome, num) in zip([c1, c2, c3], etapas):
-    with col:
-        if st.session_state.step > num:
-            st.success(f"✅ {nome}")
-        elif st.session_state.step == num:
-            st.info(f"▶️ {nome}")
-        else:
-            st.markdown(f"<div style='padding:8px;border-radius:6px;background:#f0f0f0;text-align:center'>⚪ {nome}</div>", unsafe_allow_html=True)
+# Abas principais
+aba_analise, aba_normas = st.tabs(["📄 Análise de As-built", "💬 Consultar Normas (Agente 1)"])
 
-st.divider()
+# ═══════ ABA NORMAS — Chat com Agente 1 ══════════════════════════════════════════
+with aba_normas:
+    st.header("💬 Consulta de Normas — Agente 1")
+    st.caption("Faça qualquer pergunta sobre as normas técnicas da Equatorial")
 
-# ═══════ ETAPA 1 — Upload ═══════════════════════════════════════════════════════
-if st.session_state.step == 1:
-    st.header("📄 Etapa 1 — Upload do As-built")
-
-    arquivo = st.file_uploader("Selecione o PDF do As-built", type="pdf")
-
-    pronto = arquivo and bool(GROQ_API_KEY) and normas_count() > 0
-
-    if not GROQ_API_KEY:
+    if normas_count() == 0:
+        st.warning("Nenhuma norma carregada. Carregue as normas na barra lateral primeiro.")
+    elif not GROQ_API_KEY:
         st.error("Configure a chave Groq na barra lateral.")
-    elif normas_count() == 0:
-        st.warning("Carregue as normas da Equatorial na barra lateral antes de analisar.")
-    elif arquivo:
-        st.success("Arquivo carregado. Clique em **Iniciar Análise** para continuar.")
+    else:
+        # Histórico do chat
+        for msg in st.session_state.chat_hist:
+            with st.chat_message(msg["role"], avatar="🧑" if msg["role"] == "user" else "🤖"):
+                st.markdown(msg["content"])
 
-    if st.button("▶️ Iniciar Análise", type="primary", disabled=not pronto):
-        st.session_state.asbuilt_bytes = arquivo.read()
-        st.session_state.asbuilt_name = arquivo.name
-        st.session_state.step = 2
-        st.rerun()
+        # Input
+        pergunta = st.chat_input("Pergunte sobre as normas da Equatorial...")
+        if pergunta:
+            st.session_state.chat_hist.append({"role": "user", "content": pergunta})
+            with st.chat_message("user", avatar="🧑"):
+                st.markdown(pergunta)
 
-# ═══════ ETAPA 2 — Processamento ════════════════════════════════════════════════
-elif st.session_state.step == 2:
-    st.header("⚙️ Etapa 2 — Agentes analisando...")
+            with st.chat_message("assistant", avatar="🤖"):
+                with st.spinner("Agente 1 consultando normas..."):
+                    resposta = agente1_consultar(pergunta, GROQ_API_KEY)
+                st.markdown(resposta)
 
-    barra  = st.progress(0)
-    status = st.empty()
+            st.session_state.chat_hist.append({"role": "assistant", "content": resposta})
 
-    agentes_log = st.container()
+        if st.session_state.chat_hist:
+            if st.button("🗑️ Limpar conversa"):
+                st.session_state.chat_hist = []
+                st.rerun()
 
-    try:
-        with agentes_log:
-            # Agente 3
-            status.markdown("### 🤖 Agente 3 — Lendo o as-built...")
-            barra.progress(15, "Agente 3: Extraindo materiais e serviços...")
-            asbuilt = agente3_ler_asbuilt(st.session_state.asbuilt_bytes, GROQ_API_KEY)
-            st.success(f"✅ Agente 3 — Extraiu {len(asbuilt.get('materiais',[]))} materiais e {len(asbuilt.get('servicos',[]))} serviços")
+# ═══════ ABA ANÁLISE ══════════════════════════════════════════════════════════════
+with aba_analise:
+    # Indicador de etapas
+    c1, c2, c3 = st.columns(3)
+    etapas = [("📄 Upload", 1), ("⚙️ Análise dos Agentes", 2), ("📋 Relatório Final", 3)]
+    for col, (nome, num) in zip([c1, c2, c3], etapas):
+        with col:
+            if st.session_state.step > num:
+                st.success(f"✅ {nome}")
+            elif st.session_state.step == num:
+                st.info(f"▶️ {nome}")
+            else:
+                st.markdown(f"<div style='padding:8px;border-radius:6px;background:#f0f0f0;text-align:center'>⚪ {nome}</div>", unsafe_allow_html=True)
 
-            # Agentes 1 + 2
-            status.markdown("### 🤖 Agentes 1 e 2 — Consultando normas...")
-            barra.progress(35, "Agentes 1+2: Consultando base de normas...")
-            normas_ctx = agentes_1_2_consultar_normas(asbuilt)
-            st.success("✅ Agentes 1 e 2 — Normas consultadas com sucesso")
+    st.divider()
 
-            # Agente 4
-            status.markdown("### 🤖 Agente 4 — Verificando aderência serviço vs material...")
-            barra.progress(60, "Agente 4: Verificando aderência...")
-            verificacao = agente4_verificar(asbuilt, normas_ctx, GROQ_API_KEY)
-            nc = len(verificacao.get("nao_conformidades", []))
-            st.success(f"✅ Agente 4 — Encontrou {nc} não conformidade(s)")
+    # ═══════ ETAPA 1 — Upload ═══════════════════════════════════════════════════════
+    if st.session_state.step == 1:
+        st.header("📄 Etapa 1 — Upload do As-built")
 
-            # Agente 5
-            status.markdown("### 🤖 Agente 5 — Supervisionando e gerando relatório...")
-            barra.progress(85, "Agente 5: Gerando relatório final...")
-            relatorio = agente5_relatorio(asbuilt, verificacao, normas_ctx, GROQ_API_KEY)
-            st.success("✅ Agente 5 — Relatório final gerado")
+        arquivo = st.file_uploader("Selecione o PDF do As-built", type="pdf")
 
-        barra.progress(100, "✅ Análise completa!")
-        status.markdown("### ✅ Todos os agentes concluíram!")
+        pronto = arquivo and bool(GROQ_API_KEY) and normas_count() > 0
 
-        st.session_state.report = relatorio
-        st.session_state.step = 3
-        st.rerun()
+        if not GROQ_API_KEY:
+            st.error("Configure a chave Groq na barra lateral.")
+        elif normas_count() == 0:
+            st.warning("Carregue as normas da Equatorial na barra lateral antes de analisar.")
+        elif arquivo:
+            st.success("Arquivo carregado. Clique em **Iniciar Análise** para continuar.")
 
-    except Exception as e:
-        st.error(f"Erro durante a análise: {e}")
-        if st.button("⬅️ Voltar e tentar novamente"):
-            st.session_state.step = 1
+        if st.button("▶️ Iniciar Análise", type="primary", disabled=not pronto):
+            st.session_state.asbuilt_bytes = arquivo.read()
+            st.session_state.asbuilt_name = arquivo.name
+            st.session_state.step = 2
             st.rerun()
 
-# ═══════ ETAPA 3 — Relatório ═════════════════════════════════════════════════════
-elif st.session_state.step == 3:
-    rel = st.session_state.report
+    # ═══════ ETAPA 2 — Processamento ════════════════════════════════════════════════
+    elif st.session_state.step == 2:
+        st.header("⚙️ Etapa 2 — Agentes analisando...")
 
-    if rel.get("aprovado"):
-        st.success("# ✅ AS-BUILT APROVADO")
-    else:
-        st.error("# ❌ AS-BUILT REPROVADO")
+        barra  = st.progress(0)
+        status = st.empty()
+        agentes_log = st.container()
 
-    col1, col2 = st.columns(2)
-    col1.markdown(f"**Projeto:** {rel.get('projeto', 'N/A')}")
-    col2.markdown(f"**Data:** {rel.get('data', datetime.now().strftime('%d/%m/%Y'))}")
+        try:
+            with agentes_log:
+                status.markdown("### 🤖 Agente 3 — Lendo o as-built...")
+                barra.progress(15, "Agente 3: Extraindo materiais e serviços...")
+                asbuilt = agente3_ler_asbuilt(st.session_state.asbuilt_bytes, GROQ_API_KEY)
+                st.success(f"✅ Agente 3 — Extraiu {len(asbuilt.get('materiais',[]))} materiais e {len(asbuilt.get('servicos',[]))} serviços")
 
-    if rel.get("resumo_executivo"):
-        st.info(f"📝 {rel['resumo_executivo']}")
+                status.markdown("### 🤖 Agentes 1 e 2 — Consultando normas...")
+                barra.progress(35, "Agentes 1+2: Consultando base de normas...")
+                normas_ctx = agentes_1_2_consultar_normas(asbuilt)
+                st.success("✅ Agentes 1 e 2 — Normas consultadas com sucesso")
 
-    # Métricas
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Não Conformidades", len(rel.get("nao_conformidades", [])))
-    m2.metric("Itens Aprovados",   len(rel.get("itens_aprovados", [])))
-    m3.metric("Serviços",          rel.get("total_servicos", 0))
-    m4.metric("Materiais",         rel.get("total_materiais", 0))
+                status.markdown("### 🤖 Agente 4 — Verificando aderência serviço vs material...")
+                barra.progress(60, "Agente 4: Verificando aderência...")
+                verificacao = agente4_verificar(asbuilt, normas_ctx, GROQ_API_KEY)
+                nc = len(verificacao.get("nao_conformidades", []))
+                st.success(f"✅ Agente 4 — Encontrou {nc} não conformidade(s)")
 
-    st.divider()
+                status.markdown("### 🤖 Agente 5 — Supervisionando e gerando relatório...")
+                barra.progress(85, "Agente 5: Gerando relatório final...")
+                relatorio = agente5_relatorio(asbuilt, verificacao, normas_ctx, GROQ_API_KEY)
+                st.success("✅ Agente 5 — Relatório final gerado")
 
-    # Não conformidades
-    ncs = rel.get("nao_conformidades", [])
-    if ncs:
-        st.subheader("❌ Não Conformidades")
-        for i, nc in enumerate(ncs, 1):
-            with st.expander(f"**{i}. {nc.get('descricao', 'Não conformidade')}**", expanded=(i == 1)):
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    st.markdown(f"**Norma violada:**\n{nc.get('norma', 'N/A')}")
-                    st.markdown(f"**Problema:**\n{nc.get('problema', 'N/A')}")
-                with col_b:
-                    st.markdown(f"**Como corrigir:**\n{nc.get('correcao', 'N/A')}")
+            barra.progress(100, "✅ Análise completa!")
+            status.markdown("### ✅ Todos os agentes concluíram!")
+            st.session_state.report = relatorio
+            st.session_state.step = 3
+            st.rerun()
 
-    # Itens aprovados
-    aprovados = rel.get("itens_aprovados", [])
-    if aprovados:
-        st.subheader("✅ Itens Aprovados")
-        cols = st.columns(2)
-        for i, item in enumerate(aprovados):
-            cols[i % 2].markdown(f"- {item}")
+        except Exception as e:
+            st.error(f"Erro durante a análise: {e}")
+            if st.button("⬅️ Voltar e tentar novamente"):
+                st.session_state.step = 1
+                st.rerun()
 
-    # Parecer final
-    if rel.get("parecer_final"):
+    # ═══════ ETAPA 3 — Relatório ═════════════════════════════════════════════════════
+    elif st.session_state.step == 3:
+        rel = st.session_state.report
+
+        if rel.get("aprovado"):
+            st.success("# ✅ AS-BUILT APROVADO")
+        else:
+            st.error("# ❌ AS-BUILT REPROVADO")
+
+        col1, col2 = st.columns(2)
+        col1.markdown(f"**Projeto:** {rel.get('projeto', 'N/A')}")
+        col2.markdown(f"**Data:** {rel.get('data', datetime.now().strftime('%d/%m/%Y'))}")
+
+        if rel.get("resumo_executivo"):
+            st.info(f"📝 {rel['resumo_executivo']}")
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Não Conformidades", len(rel.get("nao_conformidades", [])))
+        m2.metric("Itens Aprovados",   len(rel.get("itens_aprovados", [])))
+        m3.metric("Serviços",          rel.get("total_servicos", 0))
+        m4.metric("Materiais",         rel.get("total_materiais", 0))
+
         st.divider()
-        st.subheader("📋 Parecer Técnico Final")
-        st.markdown(rel["parecer_final"])
 
-    st.divider()
+        ncs = rel.get("nao_conformidades", [])
+        if ncs:
+            st.subheader("❌ Não Conformidades")
+            for i, nc in enumerate(ncs, 1):
+                with st.expander(f"**{i}. {nc.get('descricao', 'Não conformidade')}**", expanded=(i == 1)):
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.markdown(f"**Norma violada:**\n{nc.get('norma', 'N/A')}")
+                        st.markdown(f"**Problema:**\n{nc.get('problema', 'N/A')}")
+                    with col_b:
+                        st.markdown(f"**Como corrigir:**\n{nc.get('correcao', 'N/A')}")
 
-    # Gera texto do relatório para download
-    linhas_nc = ""
-    for i, nc in enumerate(ncs, 1):
-        linhas_nc += f"""
-{i}. {nc.get('descricao','')}
-   Norma: {nc.get('norma','')}
-   Problema: {nc.get('problema','')}
-   Correção: {nc.get('correcao','')}
-"""
+        aprovados = rel.get("itens_aprovados", [])
+        if aprovados:
+            st.subheader("✅ Itens Aprovados")
+            cols = st.columns(2)
+            for i, item in enumerate(aprovados):
+                cols[i % 2].markdown(f"- {item}")
 
-    relatorio_txt = f"""RELATÓRIO DE ANÁLISE DE AS-BUILT — EQUATORIAL
+        if rel.get("parecer_final"):
+            st.divider()
+            st.subheader("📋 Parecer Técnico Final")
+            st.markdown(rel["parecer_final"])
+
+        st.divider()
+
+        linhas_nc = ""
+        for i, nc in enumerate(ncs, 1):
+            linhas_nc += f"\n{i}. {nc.get('descricao','')}\n   Norma: {nc.get('norma','')}\n   Problema: {nc.get('problema','')}\n   Correção: {nc.get('correcao','')}\n"
+
+        relatorio_txt = f"""RELATÓRIO DE ANÁLISE DE AS-BUILT — EQUATORIAL
 {'='*60}
 Status : {'✅ APROVADO' if rel.get('aprovado') else '❌ REPROVADO'}
 Projeto: {rel.get('projeto','N/A')}
@@ -478,17 +533,17 @@ Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}
 Sistema: 5 Agentes IA — Equatorial As-built Analyzer
 """
 
-    b1, b2 = st.columns(2)
-    with b1:
-        if st.button("🔄 Nova Análise", type="primary", use_container_width=True):
-            st.session_state.step   = 1
-            st.session_state.report = None
-            st.rerun()
-    with b2:
-        st.download_button(
-            "⬇️ Baixar Relatório (.txt)",
-            data=relatorio_txt,
-            file_name=f"relatorio_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("🔄 Nova Análise", type="primary", use_container_width=True):
+                st.session_state.step   = 1
+                st.session_state.report = None
+                st.rerun()
+        with b2:
+            st.download_button(
+                "⬇️ Baixar Relatório (.txt)",
+                data=relatorio_txt,
+                file_name=f"relatorio_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
