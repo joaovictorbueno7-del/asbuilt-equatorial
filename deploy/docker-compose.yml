@@ -1,0 +1,40 @@
+version: "3.9"
+
+# Use this when you install Docker Desktop. To switch the app from SQLite to Postgres,
+# update DATABASE_URL in .env to: postgresql+asyncpg://opsai:opsai@postgres:5432/opsai
+# and QUEUE_BACKEND=celery and REDIS_URL=redis://redis:6379/0
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: opsai
+      POSTGRES_PASSWORD: opsai
+      POSTGRES_DB: opsai
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://opsai:opsai@postgres:5432/opsai
+      REDIS_URL: redis://redis:6379/0
+      QUEUE_BACKEND: celery
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+
+volumes:
+  pgdata:
