@@ -20,3 +20,5 @@ email-validator==2.2.0
 loguru==0.7.3
 pytest==8.3.4
 pytest-asyncio==0.24.0
+pypdf==5.1.0
+pymupdf==1.24.13

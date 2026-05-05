@@ -1,0 +1,9 @@
+OPS AI GRID — Backup
+Data/hora : 2026-05-05T09:35:22.466709
+Git commit: ad1ff2a831fdc4797b8f2b8f40cd015d7d63c359 feat: bootstrap OPS AI GRID SaaS â€” backend FastAPI + 9 agentes plugaveis
+Destino   : C:\Users\FILIPE-PSE\.claude\agentes de medição\backups\2026-05-05_09-35
+
+Arquivos copiados:
+  ✓ ops_ai_grid.db (2,134,016 bytes)
+  ✓ knowledge/normas/ (14 PDFs)
+  ✓ knowledge/pages/ — não existe ainda (ok)

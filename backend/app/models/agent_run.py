@@ -35,6 +35,9 @@ class AgentRun(UUIDMixin, TimestampMixin, Base):
     parent_run_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    pipeline_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=True, index=True
+    )
 
     input_payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     output_payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)

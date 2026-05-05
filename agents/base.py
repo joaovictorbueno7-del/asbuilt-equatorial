@@ -20,6 +20,7 @@ class AgentResult:
     confidence: float = 0.0
     needs_human: bool = False
     notes: str = ""
+    learning_cases: list[dict[str, Any]] = field(default_factory=list)
 
 
 class BaseAgent(ABC):
