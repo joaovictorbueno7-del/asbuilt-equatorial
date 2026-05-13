@@ -65,18 +65,24 @@ kmz_analyzer → description_filler → report_generator → anti_reprova → pi
 
 ---
 
+### Agente 03 — Report Generator ✅ IMPLEMENTADO
+
+- `backend/app/services/report_builder.py` — gerador DOCX + PDF
+  - Cabeçalho em todas as páginas: EQUATORIAL (azul) | título | OPS AI GRID | linha azul
+  - Página 1: Nota, Município, Parceira, "Postes, Estruturas e Redes"
+  - Grade 2×N: fotos extraídas do KMZ + legenda em negrito
+  - Testado: DOCX 311 KB + PDF 348 KB com fotos reais (KMZ bada6ded)
+- `agents/report_generator/__init__.py` — implementação real (era stub)
+- Endpoint: `GET /api/v1/works/{id}/report/download?fmt=docx|pdf`
+- Botões "Word (.docx)" e "PDF" na tela `/works/{id}` com spinner
+
 ## Próximo passo imediato
-**Agente 03 — Report Generator** (implementação interrompida)
+**Executar o pipeline completo end-to-end:**
+1. Subir o backend: `cd backend && uvicorn app.main:app --reload`
+2. Subir o frontend: `cd frontend && npm run dev`
+3. Fazer login → upload do KMZ `bada6ded` → aguardar processamento → clicar "Word (.docx)" → baixar o relatório real
 
-Deve gerar DOCX no formato exato da Equatorial:
-- Cabeçalho: Logo Equatorial (esq) | título centralizado | logo parceira (dir) | linha separadora
-- Página 1: Nota, Município, Parceira Construção, título negrito "Postes, Estruturas e Redes"
-- Grid: 2 fotos por linha, legenda em negrito: "[Código estrutura] - [tipo poste] [estrutura]"
-- Endpoint: `GET /api/v1/works/{id}/report/download`
-- Botão download em `/works/{id}`
-- Dependência: adicionar `python-docx` em `backend/requirements.txt`
-
-Para testar o fluxo completo: `python scripts/index_nt00022_targeted.py --dry-run`
+Após isso: Agente 02 (description_filler) ou testes automatizados.
 
 ---
 
