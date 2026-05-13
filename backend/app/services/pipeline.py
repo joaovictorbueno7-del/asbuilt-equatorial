@@ -151,12 +151,18 @@ async def _run_one(pipeline_id: str, agent_code: str,
     # Build input payload by combining upstream outputs
     input_payload: dict = {}
     if agent_code == "kmz_analyzer":
-        # Special: gets kmz_path from pipeline input
+        # Special: gets kmz_path + obra metadata from pipeline input
         async with session_scope() as db:
             pipe = (await db.execute(
                 select(PipelineRun).where(PipelineRun.id == pipeline_id)
             )).scalar_one()
-            input_payload = {"kmz_path": pipe.input_payload.get("kmz_path")}
+            input_payload = {
+                "kmz_path": pipe.input_payload.get("kmz_path"),
+                "nota": pipe.work_name,
+                "municipio": pipe.input_payload.get("municipio", ""),
+                "parceira": pipe.concessionaria,
+                "tipo": pipe.tipo,
+            }
     elif agent_code in ("utm_converter", "adherence_tester"):
         # Parallel agents: take kmz_analyzer output if available, otherwise kmz_path
         if "kmz_analyzer" in completed_outputs:

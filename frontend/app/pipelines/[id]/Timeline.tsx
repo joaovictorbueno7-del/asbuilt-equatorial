@@ -3,6 +3,61 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 
+function PipelineDownloadButtons({ runId }: { runId: string }) {
+  const [downloading, setDownloading] = useState<"docx" | "pdf" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleDownload(fmt: "docx" | "pdf") {
+    setDownloading(fmt);
+    setError(null);
+    try {
+      const res = await fetch(`/api/works/${runId}/report/download?fmt=${fmt}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `Erro ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `relatorio_${runId.slice(0, 8)}.${fmt}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Erro ao gerar");
+    } finally {
+      setDownloading(null);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <span className="text-xs text-slate-500">Relatório:</span>
+      <button
+        onClick={() => handleDownload("docx")}
+        disabled={downloading !== null}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600/20 border border-blue-500/40 text-blue-300 hover:bg-blue-600/30 transition text-xs font-medium disabled:opacity-40"
+      >
+        {downloading === "docx"
+          ? <span className="w-3 h-3 border-2 border-blue-400/40 border-t-blue-400 rounded-full animate-spin" />
+          : "📄"} Word
+      </button>
+      <button
+        onClick={() => handleDownload("pdf")}
+        disabled={downloading !== null}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600/20 border border-red-500/40 text-red-300 hover:bg-red-600/30 transition text-xs font-medium disabled:opacity-40"
+      >
+        {downloading === "pdf"
+          ? <span className="w-3 h-3 border-2 border-red-400/40 border-t-red-400 rounded-full animate-spin" />
+          : "📕"} PDF
+      </button>
+      {error && <span className="text-xs text-red-400">⚠ {error}</span>}
+    </div>
+  );
+}
+
 type Agent = {
   agent_code: string;
   depends_on: string[];
@@ -147,10 +202,13 @@ export default function Timeline({ initial }: { initial: Pipeline }) {
       </div>
 
       {kmzRun?.run_id && kmzRun.status !== "pending" && (
-        <div className="text-right">
+        <div className="flex items-center justify-between flex-wrap gap-3">
           <Link href={`/works/${kmzRun.run_id}`} className="text-sm text-accent hover:underline">
             Ver fotos analisadas (Agente 01) →
           </Link>
+          {["completed", "needs_human"].includes(pipe.status) && (
+            <PipelineDownloadButtons runId={kmzRun.run_id} />
+          )}
         </div>
       )}
 

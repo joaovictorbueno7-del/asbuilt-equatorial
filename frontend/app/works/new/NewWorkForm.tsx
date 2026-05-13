@@ -23,6 +23,7 @@ export default function NewWorkForm() {
   const [file, setFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [workName, setWorkName] = useState("");
+  const [municipio, setMunicipio] = useState("");
   const [concessionaria, setConcessionaria] = useState(CONCESSIONARIAS[0]);
   const [tipo, setTipo] = useState(TIPOS[0].value);
   const [stage, setStage] = useState<Stage>("form");
@@ -62,6 +63,7 @@ export default function NewWorkForm() {
     fd.append("work_name", workName);
     fd.append("concessionaria", concessionaria);
     fd.append("tipo", tipo);
+    fd.append("municipio", municipio);
 
     try {
       const r = await fetch("/api/pipelines", { method: "POST", body: fd });
@@ -155,13 +157,21 @@ export default function NewWorkForm() {
             placeholder="ex: Rede Bairro Cidade Nova"
           />
         </Field>
+        <Field label="Município">
+          <input
+            value={municipio}
+            onChange={(e) => setMunicipio(e.target.value)}
+            className="form-input"
+            placeholder="ex: Fortaleza"
+          />
+        </Field>
         <Field label="Concessionária">
           <select value={concessionaria} onChange={(e) => setConcessionaria(e.target.value)} className="form-input">
             {CONCESSIONARIAS.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
         </Field>
         <Field label="Tipo">
-          <select value={tipo} onChange={(e) => setTipo(e.target.value)} className="form-input sm:col-span-2">
+          <select value={tipo} onChange={(e) => setTipo(e.target.value)} className="form-input">
             {TIPOS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
           </select>
         </Field>

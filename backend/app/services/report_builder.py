@@ -1,21 +1,21 @@
 """Gerador de Relatório de Entrega de Obra — formato Equatorial.
 
 Produz DOCX (python-docx) e PDF (reportlab) no layout oficial:
-  - Cabeçalho em todas as páginas: logo esq | título centralizado | logo dir | linha
-  - Página 1: metadados (nota, município, parceira) + título "Postes, Estruturas e Redes"
-  - Grade de fotos: 2 por linha, legenda em negrito, títulos de grupo
+  - Cabeçalho em TODAS as páginas: logo esq | título centralizado | parceira dir | linha azul
+  - Página 1: Nota / Município / Parceira em negrito + título "Postes, Estruturas e Redes"
+  - Grade de fotos: 2 por linha, legenda em negrito 10pt centralizada
 """
 from __future__ import annotations
 
 import io
 import os
+import re
 import zipfile
 from pathlib import Path
-from typing import Any
 
 from loguru import logger
 
-# ── python-docx ─────────────────────────────────────────────────────────────
+# ── python-docx ───────────────────────────────────────────────────────────────
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -23,41 +23,47 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
-# ── reportlab ────────────────────────────────────────────────────────────────
+# ── reportlab ─────────────────────────────────────────────────────────────────
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Image as RLImage,
-    Table, TableStyle, HRFlowable, PageBreak,
+    Table, TableStyle, HRFlowable,
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helpers
+# Constantes
 # ─────────────────────────────────────────────────────────────────────────────
 
-_STORAGE = Path(os.environ.get("STORAGE_LOCAL_PATH", "storage"))
-_REPORTS_DIR = _STORAGE / "reports"
-_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+# Azul Equatorial
+_BLUE = RGBColor(0x00, 0x5F, 0xAF)
+_BLUE_HEX = "005FAF"
 
-# Tamanho máximo de imagem (evita fotos absurdamente grandes)
 _MAX_IMG_BYTES = 8 * 1024 * 1024  # 8 MB
 
+
+def _reports_dir() -> Path:
+    """Diretório de saída — avaliado em tempo de execução para respeitar env vars."""
+    d = Path(os.environ.get("STORAGE_LOCAL_PATH", "storage")) / "reports"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers de imagem
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _load_image_bytes(src: str | None, kmz_path: str | None) -> bytes | None:
     """Carrega bytes de uma imagem: caminho absoluto ou dentro do KMZ."""
     if not src:
         return None
-    # Caminho absoluto
     p = Path(src)
     if p.is_file():
         data = p.read_bytes()
         return data if len(data) <= _MAX_IMG_BYTES else None
-    # Dentro do KMZ
     if kmz_path and Path(kmz_path).is_file():
         safe = src.replace("..", "").lstrip("/").lstrip("\\")
         try:
@@ -74,8 +80,8 @@ def _load_image_bytes(src: str | None, kmz_path: str | None) -> bytes | None:
     return None
 
 
-def _resize_image(data: bytes, max_w: int = 800, max_h: int = 600) -> bytes:
-    """Redimensiona imagem se necessária (usando Pillow)."""
+def _resize_image(data: bytes, max_w: int = 1200, max_h: int = 900) -> bytes:
+    """Redimensiona imagem se necessária (mantém proporção)."""
     try:
         from PIL import Image
         img = Image.open(io.BytesIO(data))
@@ -91,16 +97,56 @@ def _resize_image(data: bytes, max_w: int = 800, max_h: int = 600) -> bytes:
         return data
 
 
-def _group_structures(structures: list[dict]) -> list[tuple[str, list[dict]]]:
-    """Agrupa estruturas por tipo de poste para seções do relatório.
+# ─────────────────────────────────────────────────────────────────────────────
+# Extração de metadados do KML
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Retorna lista de (título_grupo, [estruturas]).
+def _extract_kml_metadata(kmz_path: str | None) -> dict:
+    """Extrai metadados do doc.kml dentro do KMZ.
+
+    Retorna dict com: nome_projeto, coordinates (list), placemark_names
     """
+    result: dict = {}
+    if not kmz_path or not Path(kmz_path).is_file():
+        return result
+    try:
+        with zipfile.ZipFile(kmz_path, "r") as zf:
+            kml_names = [n for n in zf.namelist() if n.endswith(".kml")]
+            if not kml_names:
+                return result
+            kml_text = zf.read(kml_names[0]).decode("utf-8", errors="replace")
+
+        # Nome do projeto / Folder name
+        m = re.search(r"<Folder[^>]*>.*?<name>(.*?)</name>", kml_text, re.DOTALL)
+        if m:
+            result["nome_projeto"] = m.group(1).strip()
+        else:
+            m2 = re.search(r"<Document[^>]*>.*?<name>(.*?)</name>", kml_text, re.DOTALL)
+            if m2:
+                result["nome_projeto"] = m2.group(1).strip()
+
+        # Coordenadas de todos os placemarks (lon,lat)
+        coords = re.findall(r"<coordinates>([\-\d\.]+),([\-\d\.]+)", kml_text)
+        result["coordinates"] = [(float(c[0]), float(c[1])) for c in coords]
+
+        # Nomes dos placemarks
+        result["placemark_names"] = re.findall(r"<Placemark[^>]*>.*?<name>(.*?)</name>",
+                                               kml_text, re.DOTALL)
+
+    except Exception as e:
+        logger.warning(f"[report_builder] erro ao ler KML: {e}")
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agrupamento de estruturas
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _group_structures(structures: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Agrupa estruturas por prefixo do nome do placemark (tipo do poste)."""
     groups: dict[str, list[dict]] = {}
     for s in structures:
-        # Usa nome do placemark ou tipo de estrutura como chave do grupo
         pname = s.get("placemark_name", "")
-        # Extrai prefixo do código (ex: "PDT 9/300" de "PDT 9/300. 47023256 SI3")
         parts = pname.split(".")
         group_key = parts[0].strip() if parts else pname
         if not group_key:
@@ -109,111 +155,211 @@ def _group_structures(structures: list[dict]) -> list[tuple[str, list[dict]]]:
     return list(groups.items())
 
 
+def _extract_poste_type(name: str) -> str:
+    """Extrai tipo do poste do nome do placemark (ex: 'PDT 9/300')."""
+    m = re.search(r"\b(P?[A-Z]{2,3})\s+(\d+/\d+)", name, re.IGNORECASE)
+    if m:
+        return f"Poste {m.group(1).upper()} {m.group(2)}"
+    m2 = re.search(r"\b([A-Z]{2,3})\s+(\d+)", name, re.IGNORECASE)
+    if m2:
+        return f"Poste {m2.group(1).upper()} {m2.group(2)}"
+    return "Poste"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# DOCX Builder
+# DOCX — helpers XML
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _set_cell_border(cell, **kwargs):
-    """Define bordas de uma célula DOCX via XML (helper)."""
+def _remove_cell_borders(cell) -> None:
+    """Remove todas as bordas de uma célula DOCX via XML."""
     tc = cell._tc
     tcPr = tc.get_or_add_tcPr()
+    # Remove tcBorders existente se houver
+    for old in tcPr.findall(qn("w:tcBorders")):
+        tcPr.remove(old)
     tcBorders = OxmlElement("w:tcBorders")
-    for edge in ("top", "start", "bottom", "end", "insideH", "insideV"):
-        val = kwargs.get(edge, "none")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
         tag = OxmlElement(f"w:{edge}")
-        tag.set(qn("w:val"), val)
-        tag.set(qn("w:sz"), "4")
-        tag.set(qn("w:color"), "000000")
+        tag.set(qn("w:val"), "none")
+        tag.set(qn("w:sz"), "0")
+        tag.set(qn("w:color"), "auto")
         tcBorders.append(tag)
     tcPr.append(tcBorders)
 
 
-def _add_horizontal_rule(doc: Document, thickness_pt: float = 1.0):
-    """Adiciona linha horizontal no documento DOCX."""
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+def _set_cell_width(cell, width_cm: float) -> None:
+    """Define largura de uma célula DOCX em centímetros."""
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    for old in tcPr.findall(qn("w:tcW")):
+        tcPr.remove(old)
+    tcW = OxmlElement("w:tcW")
+    tcW.set(qn("w:w"), str(int(width_cm * 567)))  # 1cm = 567 twips
+    tcW.set(qn("w:type"), "dxa")
+    tcPr.append(tcW)
+
+
+def _set_table_layout_fixed(tbl) -> None:
+    """Força layout fixo na tabela DOCX."""
+    tblPr = tbl._tbl.tblPr
+    if tblPr is None:
+        tblPr = OxmlElement("w:tblPr")
+        tbl._tbl.insert(0, tblPr)
+    for old in tblPr.findall(qn("w:tblLayout")):
+        tblPr.remove(old)
+    tblLayout = OxmlElement("w:tblLayout")
+    tblLayout.set(qn("w:type"), "fixed")
+    tblPr.append(tblLayout)
+
+
+def _add_hr_paragraph(container, color_hex: str = _BLUE_HEX,
+                      space_before: float = 4.0, space_after: float = 4.0) -> None:
+    """Adiciona parágrafo com linha separadora inferior (borda w:bottom)."""
+    p = container.add_paragraph()
+    p.paragraph_format.space_before = Pt(space_before)
+    p.paragraph_format.space_after = Pt(space_after)
     pPr = p._p.get_or_add_pPr()
+    for old in pPr.findall(qn("w:pBdr")):
+        pPr.remove(old)
     pBdr = OxmlElement("w:pBdr")
     bottom = OxmlElement("w:bottom")
     bottom.set(qn("w:val"), "single")
-    bottom.set(qn("w:sz"), str(int(thickness_pt * 8)))
-    bottom.set(qn("w:color"), "404040")
+    bottom.set(qn("w:sz"), "12")
+    bottom.set(qn("w:color"), color_hex)
+    bottom.set(qn("w:space"), "1")
     pBdr.append(bottom)
     pPr.append(pBdr)
+
+
+def _add_meta_line(doc: Document, label: str, value: str, size_pt: float = 11.0) -> None:
+    """Adiciona linha 'Label: valor' com label em negrito e valor normal."""
+    p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(0)
-    p.paragraph_format.space_after = Pt(4)
-    return p
+    p.paragraph_format.space_after = Pt(3)
+    r_lbl = p.add_run(f"{label}: ")
+    r_lbl.bold = True
+    r_lbl.font.size = Pt(size_pt)
+    r_val = p.add_run(value or "—")
+    r_val.font.size = Pt(size_pt)
 
 
-def _add_header(doc: Document, tipo: str = "Relatório de Entrega de Obra"):
-    """Adiciona cabeçalho padrão Equatorial em todas as seções."""
+# ─────────────────────────────────────────────────────────────────────────────
+# DOCX — Cabeçalho
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _add_header(doc: Document, tipo: str, parceira: str) -> None:
+    """Monta o cabeçalho Equatorial em todas as páginas.
+
+    Estrutura:
+      [tabela sem bordas: logo esq | título central | parceira dir]
+      [parágrafo com borda inferior azul = linha separadora]
+
+    A tabela é inserida ANTES do parágrafo padrão do cabeçalho usando
+    lxml.addprevious(), garantindo a ordem correta independente da API
+    do python-docx.
+    """
     section = doc.sections[0]
     header = section.header
     header.is_linked_to_previous = False
 
-    # Tabela 1x3: logo | título | logo parceira
-    htable = header.add_table(rows=1, cols=3, width=Inches(6.5))
+    # Limpamos o parágrafo padrão (mas o mantemos — será o separador)
+    default_para = header.paragraphs[0]
+    default_para.clear()
+
+    # ── Tabela 1×3 ────────────────────────────────────────────────────────────
+    # Largura total = 17 cm (A4 − margens 2+2)
+    COL_LOGO = 3.5   # cm
+    COL_TITLE = 10.0  # cm
+    COL_PARTNER = 3.5  # cm
+
+    htable = header.add_table(rows=1, cols=3, width=Cm(COL_LOGO + COL_TITLE + COL_PARTNER))
     htable.alignment = WD_TABLE_ALIGNMENT.CENTER
-    htable.style = "Table Grid"
+    _set_table_layout_fixed(htable)
 
-    # Célula esquerda: "EQUATORIAL" em azul (placeholder sem imagem real)
-    lc = htable.cell(0, 0)
-    lc.width = Inches(1.5)
-    lc.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-    lp = lc.paragraphs[0]
-    lp.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    lr = lp.add_run("EQUATORIAL")
-    lr.bold = True
-    lr.font.size = Pt(10)
-    lr.font.color.rgb = RGBColor(0x00, 0x5F, 0xAF)
+    # Coloca tabela ANTES do parágrafo separador (reordenação via lxml)
+    default_para._p.addprevious(htable._tbl)
 
-    # Célula central: título do relatório
-    mc = htable.cell(0, 1)
-    mc.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-    mp = mc.paragraphs[0]
-    mp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    mr = mp.add_run("Relatório de Entrega de Obra")
-    mr.bold = True
-    mr.font.size = Pt(9)
-    # Segundo parágrafo: tipo
-    mp2 = mc.add_paragraph()
-    mp2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    mp2.add_run(tipo).font.size = Pt(8)
-    # Terceiro parágrafo: regional
-    mp3 = mc.add_paragraph()
-    mp3.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r3 = mp3.add_run("Superintendência Centro – Regional Metropolitana")
-    r3.font.size = Pt(7)
-    r3.font.color.rgb = RGBColor(0x44, 0x44, 0x44)
+    # Larguras das colunas
+    _set_cell_width(htable.cell(0, 0), COL_LOGO)
+    _set_cell_width(htable.cell(0, 1), COL_TITLE)
+    _set_cell_width(htable.cell(0, 2), COL_PARTNER)
 
-    # Célula direita: nome da parceira / logo placeholder
-    rc = htable.cell(0, 2)
-    rc.width = Inches(1.5)
-    rc.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-    rp = rc.paragraphs[0]
-    rp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    rr = rp.add_run("OPS AI GRID")
-    rr.font.size = Pt(8)
-    rr.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+    # Remover bordas
+    for col in range(3):
+        _remove_cell_borders(htable.cell(0, col))
 
-    # Remove bordas da tabela do cabeçalho
-    for row in htable.rows:
-        for cell in row.cells:
-            _set_cell_border(cell)
+    # ── Coluna 0: Logo / "equatorial" ─────────────────────────────────────────
+    c0 = htable.cell(0, 0)
+    c0.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    p0 = c0.paragraphs[0]
+    p0.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    p0.paragraph_format.space_before = Pt(2)
+    p0.paragraph_format.space_after = Pt(2)
+    r0 = p0.add_run("equatorial")
+    r0.bold = True
+    r0.font.size = Pt(12)
+    r0.font.color.rgb = _BLUE
 
-    # Linha separadora abaixo da tabela
-    sep_p = header.add_paragraph()
-    sep_p.paragraph_format.space_before = Pt(2)
-    sep_p.paragraph_format.space_after = Pt(0)
-    pPr = sep_p._p.get_or_add_pPr()
+    # ── Coluna 1: Título (3 linhas) ───────────────────────────────────────────
+    c1 = htable.cell(0, 1)
+    c1.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+    # Linha 1: "Relatório de Entrega de Obra" — negrito
+    p1a = c1.paragraphs[0]
+    p1a.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p1a.paragraph_format.space_before = Pt(2)
+    p1a.paragraph_format.space_after = Pt(0)
+    r1a = p1a.add_run("Relatório de Entrega de Obra")
+    r1a.bold = True
+    r1a.font.size = Pt(9)
+
+    # Linha 2: tipo da obra
+    p1b = c1.add_paragraph()
+    p1b.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p1b.paragraph_format.space_before = Pt(0)
+    p1b.paragraph_format.space_after = Pt(0)
+    r1b = p1b.add_run(tipo or "")
+    r1b.font.size = Pt(8)
+
+    # Linha 3: regional
+    p1c = c1.add_paragraph()
+    p1c.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p1c.paragraph_format.space_before = Pt(0)
+    p1c.paragraph_format.space_after = Pt(2)
+    r1c = p1c.add_run("Superintendência Centro – Regional Metropolitana")
+    r1c.font.size = Pt(7)
+    r1c.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+
+    # ── Coluna 2: Parceira ────────────────────────────────────────────────────
+    c2 = htable.cell(0, 2)
+    c2.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    p2 = c2.paragraphs[0]
+    p2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    p2.paragraph_format.space_before = Pt(2)
+    p2.paragraph_format.space_after = Pt(2)
+    r2 = p2.add_run(parceira[:30] if parceira else "")
+    r2.font.size = Pt(8)
+    r2.font.color.rgb = RGBColor(0x44, 0x44, 0x44)
+
+    # ── Linha separadora (no parágrafo após a tabela) ─────────────────────────
+    default_para.paragraph_format.space_before = Pt(0)
+    default_para.paragraph_format.space_after = Pt(0)
+    pPr = default_para._p.get_or_add_pPr()
+    for old in pPr.findall(qn("w:pBdr")):
+        pPr.remove(old)
     pBdr = OxmlElement("w:pBdr")
     bottom = OxmlElement("w:bottom")
     bottom.set(qn("w:val"), "single")
-    bottom.set(qn("w:sz"), "8")
-    bottom.set(qn("w:color"), "005FAF")
+    bottom.set(qn("w:sz"), "12")   # 1.5pt
+    bottom.set(qn("w:color"), _BLUE_HEX)
+    bottom.set(qn("w:space"), "1")
     pBdr.append(bottom)
     pPr.append(pBdr)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DOCX — build principal
+# ─────────────────────────────────────────────────────────────────────────────
 
 def build_docx(
     run_id: str,
@@ -221,95 +367,88 @@ def build_docx(
     structures: list[dict],
     kmz_path: str | None = None,
 ) -> bytes:
-    """Constrói DOCX no formato Equatorial.
-
-    Args:
-        run_id: ID do AgentRun (para logs)
-        metadata: {nota, municipio, parceira, tipo}
-        structures: lista de dicts com {placemark_name, caption, image_src, ...}
-        kmz_path: caminho para o arquivo .kmz (para extrair fotos)
-
-    Returns:
-        bytes do arquivo .docx
-    """
-    nota = metadata.get("nota", "—")
-    municipio = metadata.get("municipio", "—")
-    parceira = metadata.get("parceira", "—")
-    tipo = metadata.get("tipo", "Postes, Estruturas e Redes")
+    """Constrói o DOCX no formato oficial Equatorial."""
+    nota = metadata.get("nota") or "—"
+    municipio = metadata.get("municipio") or "—"
+    parceira = metadata.get("parceira") or "—"
+    tipo = metadata.get("tipo") or "Postes, Estruturas e Redes"
 
     doc = Document()
 
-    # ── Configuração de página ────────────────────────────────────────────────
+    # ── Configuração de página (A4) ───────────────────────────────────────────
     section = doc.sections[0]
     section.page_width = Cm(21.0)
     section.page_height = Cm(29.7)
     section.left_margin = Cm(2.0)
     section.right_margin = Cm(2.0)
-    section.top_margin = Cm(3.0)
+    section.top_margin = Cm(3.2)   # espaço para o cabeçalho
     section.bottom_margin = Cm(2.0)
 
-    # ── Cabeçalho ────────────────────────────────────────────────────────────
-    _add_header(doc, tipo)
+    # ── Cabeçalho ─────────────────────────────────────────────────────────────
+    _add_header(doc, tipo, parceira)
 
-    # ── Página 1: metadados ───────────────────────────────────────────────────
-    p = doc.add_paragraph()
-    p.paragraph_format.space_before = Pt(6)
-    p.paragraph_format.space_after = Pt(2)
-    r = p.add_run(f"Nota: {nota}")
-    r.font.size = Pt(11)
+    # ── Metadados (Página 1) ──────────────────────────────────────────────────
+    doc.add_paragraph().paragraph_format.space_after = Pt(4)  # espaçamento inicial
+    _add_meta_line(doc, "Nota", nota)
+    _add_meta_line(doc, "Município", municipio)
+    _add_meta_line(doc, "Parceira Construção", parceira)
 
-    p2 = doc.add_paragraph()
-    p2.paragraph_format.space_after = Pt(2)
-    r2 = p2.add_run(f"Município: {municipio}")
-    r2.font.size = Pt(11)
+    # ── Título "Postes, Estruturas e Redes" com separadores ───────────────────
+    _add_hr_paragraph(doc, space_before=8, space_after=6)
 
-    p3 = doc.add_paragraph()
-    p3.paragraph_format.space_after = Pt(8)
-    r3 = p3.add_run(f"Parceira Construção: {parceira}")
-    r3.font.size = Pt(11)
-
-    # Título centralizado em negrito
     p_title = doc.add_paragraph()
     p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p_title.paragraph_format.space_before = Pt(4)
-    p_title.paragraph_format.space_after = Pt(12)
+    p_title.paragraph_format.space_before = Pt(0)
+    p_title.paragraph_format.space_after = Pt(0)
     rt = p_title.add_run("Postes, Estruturas e Redes")
     rt.bold = True
     rt.font.size = Pt(13)
 
-    # ── Grade de fotos ────────────────────────────────────────────────────────
-    groups = _group_structures(structures)
-    usable_width = section.page_width - section.left_margin - section.right_margin
-    # Largura de cada foto: ~45% do espaço útil
-    photo_w_emu = int(usable_width * 0.45)
-    photo_w_inches = photo_w_emu / 914400  # EMU → inches
+    _add_hr_paragraph(doc, space_before=6, space_after=10)
 
+    # ── Grade de fotos ────────────────────────────────────────────────────────
+    # Largura útil: 17cm; cada foto ocupa ~8cm
+    PHOTO_W_INCHES = Inches(3.0)   # ~7.6cm — cabe bem em 2 colunas
+    COL_W_CM = 8.5                  # cada coluna = metade de 17cm
+
+    groups = _group_structures(structures)
     for group_title, group_structs in groups:
         # Título do grupo (negrito, centralizado)
         gp = doc.add_paragraph()
         gp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        gp.paragraph_format.space_before = Pt(8)
+        gp.paragraph_format.space_before = Pt(6)
         gp.paragraph_format.space_after = Pt(4)
         gr = gp.add_run(group_title)
         gr.bold = True
         gr.font.size = Pt(11)
 
-        # Processa fotos em pares
+        # Pares de fotos
         for i in range(0, len(group_structs), 2):
             pair = group_structs[i: i + 2]
-            # Tabela 2-colunas para o par de fotos
-            tbl = doc.add_table(rows=2, cols=len(pair))
-            tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-            tbl.style = "Table Grid"
 
-            for col_idx, struct in enumerate(pair):
+            # Sempre 2 colunas para manter alinhamento
+            tbl = doc.add_table(rows=2, cols=2)
+            tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+            _set_table_layout_fixed(tbl)
+
+            for col_idx in range(2):
+                # Definir larguras
+                _set_cell_width(tbl.cell(0, col_idx), COL_W_CM)
+                _set_cell_width(tbl.cell(1, col_idx), COL_W_CM)
+                _remove_cell_borders(tbl.cell(0, col_idx))
+                _remove_cell_borders(tbl.cell(1, col_idx))
+
+                if col_idx >= len(pair):
+                    # Célula vazia (último par com 1 foto)
+                    continue
+
+                struct = pair[col_idx]
                 img_src = struct.get("image_src") or struct.get("photo_src")
                 caption = struct.get("caption") or struct.get("placemark_name") or "—"
 
                 # Linha 0: foto
                 cell_img = tbl.cell(0, col_idx)
                 cell_img.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-                _set_cell_border(cell_img)
                 cp = cell_img.paragraphs[0]
                 cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 cp.paragraph_format.space_before = Pt(2)
@@ -319,30 +458,28 @@ def build_docx(
                 if img_bytes:
                     try:
                         img_bytes = _resize_image(img_bytes)
-                        img_stream = io.BytesIO(img_bytes)
-                        cp.add_run().add_picture(img_stream, width=Inches(photo_w_inches))
+                        cp.add_run().add_picture(io.BytesIO(img_bytes), width=PHOTO_W_INCHES)
                     except Exception as e:
                         logger.warning(f"[report_builder] foto falhou ({img_src}): {e}")
                         cp.add_run("[foto indisponível]").font.size = Pt(9)
                 else:
                     cp.add_run("[foto indisponível]").font.size = Pt(9)
 
-                # Linha 1: legenda em negrito
+                # Linha 1: legenda — negrito, centralizado, 10pt
                 cell_cap = tbl.cell(1, col_idx)
-                _set_cell_border(cell_cap)
                 lp = cell_cap.paragraphs[0]
                 lp.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 lp.paragraph_format.space_before = Pt(2)
-                lp.paragraph_format.space_after = Pt(2)
+                lp.paragraph_format.space_after = Pt(4)
                 lr = lp.add_run(caption)
                 lr.bold = True
-                lr.font.size = Pt(9)
+                lr.font.size = Pt(10)
 
-            # Se só 1 estrutura no par, mescla coluna vazia (só aparece se colunas=1)
-            # (já tratado automaticamente com len(pair) colunas)
-            doc.add_paragraph().paragraph_format.space_after = Pt(4)
+            # Espaço entre pares
+            sp = doc.add_paragraph()
+            sp.paragraph_format.space_after = Pt(6)
 
-    # ── Salva em bytes ─────────────────────────────────────────────────────────
+    # ── Salva ─────────────────────────────────────────────────────────────────
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
@@ -358,73 +495,72 @@ def build_pdf(
     structures: list[dict],
     kmz_path: str | None = None,
 ) -> bytes:
-    """Constrói PDF no formato Equatorial usando reportlab.
-
-    Mesma estrutura do DOCX.
-    """
-    nota = metadata.get("nota", "—")
-    municipio = metadata.get("municipio", "—")
-    parceira = metadata.get("parceira", "—")
-    tipo = metadata.get("tipo", "Postes, Estruturas e Redes")
+    """Constrói PDF no formato Equatorial usando reportlab."""
+    nota = metadata.get("nota") or "—"
+    municipio = metadata.get("municipio") or "—"
+    parceira = metadata.get("parceira") or "—"
+    tipo = metadata.get("tipo") or "Postes, Estruturas e Redes"
 
     buf = io.BytesIO()
-    PAGE_W, PAGE_H = A4  # 595 × 842 pt
-    margin = 2 * cm
+    PAGE_W, PAGE_H = A4
+    MARGIN = 2 * cm
+    HDR_H = 2.0 * cm  # altura do cabeçalho
+
     doc = SimpleDocTemplate(
         buf,
         pagesize=A4,
-        leftMargin=margin,
-        rightMargin=margin,
-        topMargin=3.5 * cm,
+        leftMargin=MARGIN,
+        rightMargin=MARGIN,
+        topMargin=HDR_H + 1.2 * cm,
         bottomMargin=2 * cm,
     )
 
     styles = getSampleStyleSheet()
-    # Estilos customizados
-    h1 = ParagraphStyle("H1", parent=styles["Heading1"], fontSize=13, leading=16,
-                         alignment=TA_CENTER, spaceAfter=12)
-    h2 = ParagraphStyle("H2", parent=styles["Heading2"], fontSize=11, leading=14,
-                         alignment=TA_CENTER, spaceAfter=6, spaceBefore=10)
-    body = ParagraphStyle("Body", parent=styles["Normal"], fontSize=11, leading=14,
-                           spaceAfter=4)
-    caption_style = ParagraphStyle("Caption", parent=styles["Normal"], fontSize=9,
-                                    leading=12, alignment=TA_CENTER, fontName="Helvetica-Bold")
-    header_center = ParagraphStyle("HdrCenter", parent=styles["Normal"], fontSize=8,
-                                    alignment=TA_CENTER, leading=11)
-    header_right = ParagraphStyle("HdrRight", parent=styles["Normal"], fontSize=8,
-                                   alignment=TA_RIGHT)
+    body = ParagraphStyle("Body", parent=styles["Normal"], fontSize=11, leading=14, spaceAfter=3)
+    body_bold = ParagraphStyle("BodyBold", parent=styles["Normal"], fontSize=11, leading=14,
+                                fontName="Helvetica-Bold", spaceAfter=3)
+    h1 = ParagraphStyle("H1", parent=styles["Normal"], fontSize=13, leading=16,
+                         alignment=TA_CENTER, fontName="Helvetica-Bold", spaceAfter=4, spaceBefore=0)
+    h2 = ParagraphStyle("H2", parent=styles["Normal"], fontSize=11, leading=14,
+                         alignment=TA_CENTER, fontName="Helvetica-Bold", spaceAfter=4, spaceBefore=8)
+    caption_style = ParagraphStyle("Caption", parent=styles["Normal"], fontSize=10,
+                                    leading=13, alignment=TA_CENTER, fontName="Helvetica-Bold")
 
+    # Callbacks para cabeçalho
+    _hdr_meta = {
+        "equatorial": "equatorial",
+        "title_lines": ["Relatório de Entrega de Obra", tipo,
+                        "Superintendência Centro – Regional Metropolitana"],
+        "partner": parceira[:30] if parceira else "",
+        "page_w": PAGE_W,
+        "page_h": PAGE_H,
+        "hdr_h": HDR_H,
+        "margin": MARGIN,
+    }
+
+    def _on_page(canvas, doc_obj):
+        _draw_pdf_header(canvas, _hdr_meta)
+
+    # ── Conteúdo ──────────────────────────────────────────────────────────────
     content = []
 
-    # ── Cabeçalho (via canvas callback) ──────────────────────────────────────
-    equatorial_label = "EQUATORIAL"
-    title_lines = [
-        "Relatório de Entrega de Obra",
-        tipo,
-        "Superintendência Centro – Regional Metropolitana",
-    ]
-    partner_label = "OPS AI GRID"
+    # Metadados com label em negrito
+    def meta_row(label, value):
+        return Paragraph(f"<b>{label}:</b> {value or '—'}", body)
 
-    def on_first_page(canvas, doc):
-        _draw_pdf_header(canvas, PAGE_W, PAGE_H, doc.topMargin,
-                         equatorial_label, title_lines, partner_label)
-
-    def on_later_pages(canvas, doc):
-        _draw_pdf_header(canvas, PAGE_W, PAGE_H, doc.topMargin,
-                         equatorial_label, title_lines, partner_label)
-
-    # ── Metadados ─────────────────────────────────────────────────────────────
-    content.append(Paragraph(f"<b>Nota:</b> {nota}", body))
-    content.append(Paragraph(f"<b>Município:</b> {municipio}", body))
-    content.append(Paragraph(f"<b>Parceira Construção:</b> {parceira}", body))
-    content.append(Spacer(1, 12))
+    content.append(meta_row("Nota", nota))
+    content.append(meta_row("Município", municipio))
+    content.append(meta_row("Parceira Construção", parceira))
+    content.append(Spacer(1, 8))
+    content.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(f"#{_BLUE_HEX}")))
+    content.append(Spacer(1, 4))
     content.append(Paragraph("Postes, Estruturas e Redes", h1))
-    content.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#005FAF")))
+    content.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(f"#{_BLUE_HEX}")))
     content.append(Spacer(1, 12))
 
-    # ── Grade de fotos ────────────────────────────────────────────────────────
-    photo_w = (PAGE_W - 2 * margin - 1 * cm) * 0.47  # ~47% de largura
-    photo_h = photo_w * 0.75  # proporção 4:3
+    # Grade de fotos
+    photo_w = (PAGE_W - 2 * MARGIN - 0.5 * cm) * 0.47
+    photo_h = photo_w * 0.75
 
     groups = _group_structures(structures)
     for group_title, group_structs in groups:
@@ -432,139 +568,141 @@ def build_pdf(
 
         for i in range(0, len(group_structs), 2):
             pair = group_structs[i: i + 2]
-            row_imgs = []
-            row_captions = []
+            row_imgs: list = []
+            row_caps: list = []
 
-            for struct in pair:
-                img_src = struct.get("image_src") or struct.get("photo_src")
-                caption = struct.get("caption") or struct.get("placemark_name") or "—"
-                img_bytes = _load_image_bytes(img_src, kmz_path)
-
-                if img_bytes:
-                    try:
-                        img_bytes = _resize_image(img_bytes, 800, 600)
-                        rl_img = RLImage(io.BytesIO(img_bytes), width=photo_w, height=photo_h)
-                        row_imgs.append(rl_img)
-                    except Exception as e:
-                        logger.warning(f"[report_builder/pdf] foto falhou: {e}")
+            for j in range(2):
+                if j < len(pair):
+                    struct = pair[j]
+                    img_src = struct.get("image_src") or struct.get("photo_src")
+                    cap_text = struct.get("caption") or struct.get("placemark_name") or "—"
+                    img_bytes = _load_image_bytes(img_src, kmz_path)
+                    if img_bytes:
+                        try:
+                            img_bytes = _resize_image(img_bytes, 1200, 900)
+                            row_imgs.append(RLImage(io.BytesIO(img_bytes),
+                                                    width=photo_w, height=photo_h))
+                        except Exception as e:
+                            logger.warning(f"[report_builder/pdf] foto falhou: {e}")
+                            row_imgs.append(Paragraph("[foto indisponível]", caption_style))
+                    else:
                         row_imgs.append(Paragraph("[foto indisponível]", caption_style))
+                    row_caps.append(Paragraph(cap_text, caption_style))
                 else:
-                    row_imgs.append(Paragraph("[foto indisponível]", caption_style))
+                    # Célula vazia
+                    row_imgs.append(Spacer(photo_w, photo_h))
+                    row_caps.append(Paragraph("", caption_style))
 
-                row_captions.append(Paragraph(caption, caption_style))
-
-            # Preenche segunda célula se par incompleto
-            if len(pair) == 1:
-                row_imgs.append(Spacer(photo_w, photo_h))
-                row_captions.append(Paragraph("", caption_style))
-
-            col_w = (PAGE_W - 2 * margin) / 2
-            tbl = Table(
-                [row_imgs, row_captions],
-                colWidths=[col_w, col_w],
-            )
+            col_w = (PAGE_W - 2 * MARGIN) / 2
+            tbl = Table([row_imgs, row_caps], colWidths=[col_w, col_w])
             tbl.setStyle(TableStyle([
                 ("ALIGN", (0, 0), (-1, -1), "CENTER"),
                 ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
                 ("VALIGN", (0, 1), (-1, 1), "TOP"),
-                ("BOTTOMPADDING", (0, 0), (-1, 0), 4),
-                ("TOPPADDING", (0, 1), (-1, 1), 2),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.lightgrey),
             ]))
             content.append(tbl)
             content.append(Spacer(1, 8))
 
-    doc.build(content, onFirstPage=on_first_page, onLaterPages=on_later_pages)
+    doc.build(content, onFirstPage=_on_page, onLaterPages=_on_page)
     return buf.getvalue()
 
 
-def _draw_pdf_header(canvas, page_w, page_h, top_margin, equatorial, title_lines, partner):
+def _draw_pdf_header(canvas, meta: dict) -> None:
     """Desenha cabeçalho fixo em cada página PDF."""
     from reportlab.lib.units import cm as rl_cm
-    canvas.saveState()
 
-    hdr_y = page_h - top_margin + 0.5 * rl_cm
-    hdr_h = 1.8 * rl_cm
-    margin = 2 * rl_cm
+    canvas.saveState()
+    page_w = meta["page_w"]
+    page_h = meta["page_h"]
+    hdr_h = meta["hdr_h"]
+    margin = meta["margin"]
     usable_w = page_w - 2 * margin
 
-    # Fundo do cabeçalho (levemente cinza)
+    top_y = page_h - 0.5 * rl_cm
+    bot_y = top_y - hdr_h
+
+    # Fundo levemente cinza
     canvas.setFillColorRGB(0.97, 0.97, 0.97)
-    canvas.rect(margin, hdr_y - hdr_h, usable_w, hdr_h, fill=1, stroke=0)
+    canvas.rect(margin, bot_y, usable_w, hdr_h, fill=1, stroke=0)
 
-    # Logo esquerda (texto azul em negrito)
-    canvas.setFont("Helvetica-Bold", 10)
-    canvas.setFillColorRGB(0.0, 0.37, 0.69)
-    canvas.drawString(margin + 4, hdr_y - 14, equatorial)
+    mid_y = (top_y + bot_y) / 2
 
-    # Título centralizado
-    canvas.setFillColorRGB(0.1, 0.1, 0.1)
+    # ── Logo esquerda ─────────────────────────────────────────────────────────
+    canvas.setFont("Helvetica-Bold", 12)
+    canvas.setFillColorRGB(0.0, 0.373, 0.686)
+    canvas.drawString(margin + 6, mid_y - 5, meta["equatorial"])
+
+    # ── Título centralizado ───────────────────────────────────────────────────
+    lines = meta["title_lines"]
     cx = page_w / 2
-    if len(title_lines) >= 1:
+    if len(lines) >= 1:
         canvas.setFont("Helvetica-Bold", 9)
-        canvas.drawCentredString(cx, hdr_y - 12, title_lines[0])
-    if len(title_lines) >= 2:
+        canvas.setFillColorRGB(0.1, 0.1, 0.1)
+        canvas.drawCentredString(cx, mid_y + 5, lines[0])
+    if len(lines) >= 2:
         canvas.setFont("Helvetica", 8)
-        canvas.drawCentredString(cx, hdr_y - 22, title_lines[1])
-    if len(title_lines) >= 3:
+        canvas.setFillColorRGB(0.2, 0.2, 0.2)
+        canvas.drawCentredString(cx, mid_y - 5, lines[1])
+    if len(lines) >= 3:
         canvas.setFont("Helvetica", 7)
-        canvas.setFillColorRGB(0.4, 0.4, 0.4)
-        canvas.drawCentredString(cx, hdr_y - 32, title_lines[2])
+        canvas.setFillColorRGB(0.45, 0.45, 0.45)
+        canvas.drawCentredString(cx, mid_y - 14, lines[2])
 
-    # Parceira (direita)
+    # ── Parceira direita ──────────────────────────────────────────────────────
     canvas.setFont("Helvetica", 8)
     canvas.setFillColorRGB(0.4, 0.4, 0.4)
-    canvas.drawRightString(page_w - margin - 4, hdr_y - 14, partner)
+    canvas.drawRightString(page_w - margin - 6, mid_y - 5, meta["partner"])
 
-    # Linha azul separadora
-    canvas.setStrokeColorRGB(0.0, 0.37, 0.69)
+    # ── Linha separadora azul ─────────────────────────────────────────────────
+    canvas.setStrokeColorRGB(0.0, 0.373, 0.686)
     canvas.setLineWidth(1.5)
-    canvas.line(margin, hdr_y - hdr_h - 1, page_w - margin, hdr_y - hdr_h - 1)
+    canvas.line(margin, bot_y - 1, page_w - margin, bot_y - 1)
 
     canvas.restoreState()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Extração de estruturas a partir do output do AgentRun
+# Extração de estruturas do AgentRun output
 # ─────────────────────────────────────────────────────────────────────────────
 
 def extract_structures_from_run(output_payload: dict, kmz_path: str | None = None) -> list[dict]:
-    """Converte o output_payload do AgentRun em lista de estruturas para o relatório.
-
-    Suporta formato do kmz_analyzer (placemarks com fotos) e do description_filler.
-    """
+    """Converte output_payload do AgentRun em lista de estruturas para o relatório."""
     structures = []
-
-    # Formato 1: placemarks do kmz_analyzer
     placemarks = output_payload.get("placemarks") or output_payload.get("structures") or []
+
     for pm in placemarks:
         name = pm.get("name") or pm.get("placemark_name") or "—"
         photos = pm.get("photos") or pm.get("images") or []
 
-        # Monta legenda: "Poste DT 11/300 - N1 SI3"
-        struct_codes = []
-        if pm.get("conformidade"):
-            confirmed = pm.get("estruturas_confirmadas") or pm.get("declared_codes") or []
-            struct_codes = confirmed[:2] if confirmed else []
+        # Códigos de estrutura confirmados ou declarados
+        struct_codes: list[str] = []
+        confirmed = pm.get("estruturas_confirmadas") or []
+        declared = pm.get("declared_codes") or []
+        if confirmed:
+            struct_codes = confirmed[:3]
         elif pm.get("structure_type"):
             struct_codes = [pm["structure_type"]]
+        elif declared:
+            struct_codes = declared[:3]
 
-        # Extrai tipo de poste do nome (ex: "PDT 9/300")
         poste_type = _extract_poste_type(name)
-        codes_str = " ".join(struct_codes) if struct_codes else name
+        codes_str = " ".join(struct_codes) if struct_codes else ""
+        caption = f"{poste_type} - {codes_str}".strip(" -") if codes_str else poste_type
 
         if photos:
             for photo in photos:
-                photo_src = photo if isinstance(photo, str) else photo.get("src") or photo.get("path", "")
-                caption = f"{poste_type} - {codes_str}".strip(" -")
+                photo_src = photo if isinstance(photo, str) else (
+                    photo.get("src") or photo.get("path") or photo.get("file_rel_path", "")
+                )
                 structures.append({
                     "placemark_name": name,
                     "image_src": photo_src,
                     "caption": caption,
                 })
         else:
-            # Sem foto: inclui mesmo assim (mostrará placeholder)
-            caption = f"{poste_type} - {codes_str}".strip(" -")
             structures.append({
                 "placemark_name": name,
                 "image_src": None,
@@ -572,19 +710,6 @@ def extract_structures_from_run(output_payload: dict, kmz_path: str | None = Non
             })
 
     return structures
-
-
-def _extract_poste_type(name: str) -> str:
-    """Extrai tipo do poste do nome do placemark (ex: 'PDT 9/300')."""
-    import re
-    # Padrão: PDT 9/300, PCC 9/300, DT 11/300, etc.
-    m = re.search(r"\b(P?[A-Z]{2,3})\s+(\d+/\d+)", name, re.IGNORECASE)
-    if m:
-        return f"Poste {m.group(1).upper()} {m.group(2)}"
-    m2 = re.search(r"\b([A-Z]{2,3})\s+(\d+)", name, re.IGNORECASE)
-    if m2:
-        return f"Poste {m2.group(1).upper()} {m2.group(2)}"
-    return "Poste"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -600,18 +725,33 @@ def generate_report(
     """Gera relatório a partir do output de um AgentRun.
 
     Args:
-        run_id: ID do run
-        output_payload: dict com placemarks/structures
-        kmz_path: caminho do KMZ (para extração de fotos)
+        run_id: ID do run (usado no nome do arquivo)
+        output_payload: dict com placemarks/structures + metadados
+        kmz_path: caminho do KMZ para extração de fotos
         fmt: "docx" ou "pdf"
 
     Returns:
         (bytes_do_arquivo, nome_do_arquivo)
     """
+    # Tenta extrair metadados do KML se disponíveis
+    kml_meta = _extract_kml_metadata(kmz_path)
+
+    # Nota: usa work_name > nome_projeto do KML > run_id[:8]
+    nota = (
+        output_payload.get("nota")
+        or output_payload.get("work_name")
+        or kml_meta.get("nome_projeto")
+        or run_id[:8]
+    )
+
     metadata = {
-        "nota": output_payload.get("nota") or output_payload.get("work_name") or run_id[:8],
+        "nota": nota,
         "municipio": output_payload.get("municipio") or "—",
-        "parceira": output_payload.get("parceira") or output_payload.get("concessionaria") or "—",
+        "parceira": (
+            output_payload.get("parceira")
+            or output_payload.get("concessionaria")
+            or "—"
+        ),
         "tipo": output_payload.get("tipo") or "Postes, Estruturas e Redes",
     }
 
@@ -625,8 +765,7 @@ def generate_report(
         data = build_docx(run_id, metadata, structures, kmz_path)
         filename = f"relatorio_{run_id[:8]}.docx"
 
-    # Salva cópia em disco
-    out_path = _REPORTS_DIR / filename
+    out_path = _reports_dir() / filename
     out_path.write_bytes(data)
     logger.info(f"[report_builder] salvo em {out_path} ({len(data):,} bytes)")
 

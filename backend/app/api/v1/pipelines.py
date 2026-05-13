@@ -29,6 +29,7 @@ async def create_pipeline(
     work_name: str = Form(default=""),
     concessionaria: str = Form(default=""),
     tipo: str = Form(default="as_built"),
+    municipio: str = Form(default=""),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -56,6 +57,7 @@ async def create_pipeline(
             "kmz_path": str(kmz_path),
             "original_filename": file.filename,
             "size_bytes": len(content),
+            "municipio": municipio,
         },
     )
     db.add(pipe)

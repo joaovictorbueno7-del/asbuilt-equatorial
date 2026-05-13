@@ -47,6 +47,7 @@ async def create_work(
     work_name: str = Form(default=""),
     concessionaria: str = Form(default=""),
     tipo: str = Form(default="as_built"),
+    municipio: str = Form(default=""),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -75,6 +76,7 @@ async def create_work(
             "work_name": work_name or file.filename,
             "concessionaria": concessionaria,
             "tipo": tipo,
+            "municipio": municipio,
         },
     )
     db.add(run)
@@ -171,10 +173,13 @@ async def download_report(
     kmz_path = run.input_payload.get("kmz_path")
     work_name = run.input_payload.get("work_name") or run.input_payload.get("original_filename", "")
 
-    # Injeta metadados úteis no payload para o report builder
+    # Injeta metadados da obra no payload do report builder
     payload = dict(run.output_payload)
     payload.setdefault("nota", work_name)
-    payload.setdefault("concessionaria", run.input_payload.get("concessionaria", ""))
+    payload.setdefault("municipio", run.input_payload.get("municipio", ""))
+    payload.setdefault("parceira",
+                       run.input_payload.get("parceira")
+                       or run.input_payload.get("concessionaria", ""))
     payload.setdefault("tipo", run.input_payload.get("tipo", "Postes, Estruturas e Redes"))
     payload["run_id"] = run_id
 
