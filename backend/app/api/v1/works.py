@@ -140,6 +140,68 @@ async def get_work_image(run_id: str, key: str,
     return Response(content=data, media_type=mt, headers={"Cache-Control": "private, max-age=3600"})
 
 
+@router.get("/{run_id}/report/download")
+async def download_report(
+    run_id: str,
+    fmt: str = "docx",
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Gera e devolve o relatório DOCX ou PDF de um work.
+
+    Query param `fmt`: "docx" (padrão) ou "pdf".
+    """
+    from fastapi.responses import Response
+    from app.services.report_builder import generate_report
+
+    run = (await db.execute(
+        select(AgentRun).where(AgentRun.id == run_id, AgentRun.tenant_id == user.tenant_id)
+    )).scalar_one_or_none()
+    if not run:
+        raise HTTPException(404, "Work not found")
+
+    if run.status.value not in ("completed", "done", "success"):
+        if not run.output_payload:
+            raise HTTPException(409, "Work ainda não foi processado")
+
+    fmt = fmt.lower().strip(".")
+    if fmt not in ("docx", "pdf"):
+        raise HTTPException(400, "fmt deve ser 'docx' ou 'pdf'")
+
+    kmz_path = run.input_payload.get("kmz_path")
+    work_name = run.input_payload.get("work_name") or run.input_payload.get("original_filename", "")
+
+    # Injeta metadados úteis no payload para o report builder
+    payload = dict(run.output_payload)
+    payload.setdefault("nota", work_name)
+    payload.setdefault("concessionaria", run.input_payload.get("concessionaria", ""))
+    payload.setdefault("tipo", run.input_payload.get("tipo", "Postes, Estruturas e Redes"))
+    payload["run_id"] = run_id
+
+    try:
+        data, filename = generate_report(
+            run_id=run_id,
+            output_payload=payload,
+            kmz_path=kmz_path,
+            fmt=fmt,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao gerar relatório: {e}")
+
+    media_types = {
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "pdf": "application/pdf",
+    }
+    return Response(
+        content=data,
+        media_type=media_types[fmt],
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(data)),
+        },
+    )
+
+
 @router.get("/{run_id}", response_model=WorkDetail)
 async def get_work(run_id: str, db: AsyncSession = Depends(get_db),
                    user: User = Depends(get_current_user)):

@@ -154,20 +154,23 @@ export default function ResultView({ work, cases }: { work: Work; cases: Case[] 
         )}
       </section>
 
-      <div className="flex items-center justify-end gap-3 pt-4 border-t border-grid-line">
-        <Link
-          href="/dashboard"
-          className="px-4 py-2 rounded-lg border border-grid-line text-slate-300 hover:bg-bg-elevated transition text-sm"
-        >
-          Voltar
-        </Link>
-        <button
-          disabled
-          title="Agente 02 será implementado em seguida"
-          className="px-4 py-2 rounded-lg bg-accent/30 text-bg/70 font-semibold cursor-not-allowed"
-        >
-          Avançar para Agente 02 →
-        </button>
+      <div className="flex items-center justify-between gap-3 pt-4 border-t border-grid-line flex-wrap">
+        <DownloadReportButtons runId={work.run_id} disabled={isProcessing} />
+        <div className="flex items-center gap-3">
+          <Link
+            href="/dashboard"
+            className="px-4 py-2 rounded-lg border border-grid-line text-slate-300 hover:bg-bg-elevated transition text-sm"
+          >
+            Voltar
+          </Link>
+          <button
+            disabled
+            title="Agente 02 será implementado em seguida"
+            className="px-4 py-2 rounded-lg bg-accent/30 text-bg/70 font-semibold cursor-not-allowed"
+          >
+            Avançar para Agente 02 →
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -299,4 +302,67 @@ function StructureCard({ runId, structure, caseInfo }: {
 
 function MapSkeleton() {
   return <div className="w-full h-full flex items-center justify-center text-slate-500 text-sm">Carregando mapa…</div>;
+}
+
+function DownloadReportButtons({ runId, disabled }: { runId: string; disabled: boolean }) {
+  const [downloading, setDownloading] = useState<"docx" | "pdf" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleDownload(fmt: "docx" | "pdf") {
+    setDownloading(fmt);
+    setError(null);
+    try {
+      const res = await fetch(`/api/works/${runId}/report/download?fmt=${fmt}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `Erro ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `relatorio_${runId.slice(0, 8)}.${fmt}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Erro ao gerar relatório");
+    } finally {
+      setDownloading(null);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <span className="text-xs text-slate-500 mr-1">Relatório:</span>
+      <button
+        onClick={() => handleDownload("docx")}
+        disabled={disabled || downloading !== null}
+        className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600/20 border border-blue-500/40 text-blue-300 hover:bg-blue-600/30 hover:border-blue-400/60 transition text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        {downloading === "docx" ? (
+          <span className="w-4 h-4 border-2 border-blue-400/40 border-t-blue-400 rounded-full animate-spin" />
+        ) : (
+          <span>📄</span>
+        )}
+        Word (.docx)
+      </button>
+      <button
+        onClick={() => handleDownload("pdf")}
+        disabled={disabled || downloading !== null}
+        className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-red-600/20 border border-red-500/40 text-red-300 hover:bg-red-600/30 hover:border-red-400/60 transition text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        {downloading === "pdf" ? (
+          <span className="w-4 h-4 border-2 border-red-400/40 border-t-red-400 rounded-full animate-spin" />
+        ) : (
+          <span>📕</span>
+        )}
+        PDF
+      </button>
+      {error && (
+        <span className="text-xs text-red-400 ml-1">⚠ {error}</span>
+      )}
+    </div>
+  );
 }
