@@ -713,6 +713,35 @@ def extract_structures_from_run(output_payload: dict, kmz_path: str | None = Non
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Mapeamento tipo código → label legível para o cabeçalho
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TIPO_LABELS: dict[str, str] = {
+    "as_built":            "AS BUILT",
+    "obras":               "Construção",
+    "construcao":          "Construção",
+    "manutencao":          "Manutenção",
+    "manutencao_corretiva":"Manutenção Corretiva",
+    "inspecao":            "Inspeção",
+    "entrega":             "Entrega de Obra",
+}
+
+
+def _tipo_label(raw: str | None) -> str:
+    """Converte código do tipo (ex: 'as_built') para label de exibição."""
+    if not raw:
+        return "AS BUILT"
+    raw_clean = raw.strip().lower().replace(" ", "_").replace("-", "_")
+    # Busca exata
+    if raw_clean in _TIPO_LABELS:
+        return _TIPO_LABELS[raw_clean]
+    # Se já é um texto legível (ex: "Construção"), retorna como está
+    if any(c.isalpha() and c == c.upper() for c in raw):
+        return raw
+    return raw.upper()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -721,6 +750,7 @@ def generate_report(
     output_payload: dict,
     kmz_path: str | None = None,
     fmt: str = "docx",
+    filename_override: str | None = None,
 ) -> tuple[bytes, str]:
     """Gera relatório a partir do output de um AgentRun.
 
@@ -729,6 +759,7 @@ def generate_report(
         output_payload: dict com placemarks/structures + metadados
         kmz_path: caminho do KMZ para extração de fotos
         fmt: "docx" ou "pdf"
+        filename_override: nome do arquivo de saída (sem extensão)
 
     Returns:
         (bytes_do_arquivo, nome_do_arquivo)
@@ -744,6 +775,10 @@ def generate_report(
         or run_id[:8]
     )
 
+    # tipo: código interno (as_built, obras, manutencao) → label legível para cabeçalho
+    tipo_raw = output_payload.get("tipo") or "as_built"
+    tipo_label = _tipo_label(tipo_raw)
+
     metadata = {
         "nota": nota,
         "municipio": output_payload.get("municipio") or "—",
@@ -752,18 +787,22 @@ def generate_report(
             or output_payload.get("concessionaria")
             or "—"
         ),
-        "tipo": output_payload.get("tipo") or "Postes, Estruturas e Redes",
+        "tipo": tipo_label,  # somente para o cabeçalho; corpo usa "Postes, Estruturas e Redes"
     }
 
     structures = extract_structures_from_run(output_payload, kmz_path)
     logger.info(f"[report_builder] run={run_id} fmt={fmt} estruturas={len(structures)}")
 
+    stem = filename_override or f"relatorio_{run_id[:8]}"
+    # Garante que o stem não tem extensão
+    stem = stem.removesuffix(".docx").removesuffix(".pdf")
+
     if fmt == "pdf":
         data = build_pdf(run_id, metadata, structures, kmz_path)
-        filename = f"relatorio_{run_id[:8]}.pdf"
+        filename = f"{stem}.pdf"
     else:
         data = build_docx(run_id, metadata, structures, kmz_path)
-        filename = f"relatorio_{run_id[:8]}.docx"
+        filename = f"{stem}.docx"
 
     out_path = _reports_dir() / filename
     out_path.write_bytes(data)
