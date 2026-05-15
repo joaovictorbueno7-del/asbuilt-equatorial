@@ -473,17 +473,47 @@ async def recognize_structure(
         .limit(100)
     )).scalars().all()
 
-    # ── Seleciona até 6 casos com imagens no disco (few-shot visual) ─────────
-    visual_examples: list[tuple] = []  # (label_text, b64_img)
+    # ── Extrai todos os códigos únicos do catálogo de treinamento ────────────
+    all_mt_codes: set[str] = set()
+    all_bt_codes: set[str] = set()
+    all_pole_sizes: set[str] = set()
     for row in rows:
-        if len(visual_examples) >= 6:
-            break
+        inp = row.input_payload or {}
+        codes = inp.get("structure_codes", [])
+        pole_size = inp.get("pole_size", "")
+        if pole_size:
+            all_pole_sizes.add(pole_size)
+        for c in codes:
+            if c.startswith("MT:"):
+                all_mt_codes.add(c.replace("MT:", "").strip())
+            elif c.startswith("BT:"):
+                all_bt_codes.add(c.replace("BT:", "").strip())
+
+    # ── Seleciona exemplos visuais DIVERSIFICADOS (MT, BT e Poste separados) ──
+    # Garante que os 6 slots tenham variedade de tipos, não só os mais recentes
+    buckets: dict[str, list] = {"mt": [], "bt": [], "poste": [], "outro": []}
+    for row in rows:
         inp = row.input_payload or {}
         exp = row.expected_output or {}
+        codes = inp.get("structure_codes", [])
         img_path = Path(inp.get("image_path", ""))
         if not img_path.is_file():
             continue
+        has_mt = any(c.startswith("MT:") for c in codes)
+        has_bt = any(c.startswith("BT:") for c in codes)
+        has_poste = any(c.startswith("POSTE") for c in codes)
+        bucket = "mt" if has_mt else "bt" if has_bt else "poste" if has_poste else "outro"
+        if len(buckets[bucket]) < 2:   # máx 2 por tipo
+            buckets[bucket].append((row, inp, exp))
+
+    candidate_rows = (
+        buckets["mt"] + buckets["bt"] + buckets["poste"] + buckets["outro"]
+    )[:6]
+
+    visual_examples: list[tuple] = []  # (label_text, b64_img)
+    for row, inp, exp in candidate_rows:
         try:
+            img_path = Path(inp.get("image_path", ""))
             ex_bytes = _resize_image(img_path.read_bytes(), max_px=600)
             ex_b64 = base64.standard_b64encode(ex_bytes).decode()
             label = _case_label(inp, exp, row.human_notes or "")
@@ -491,27 +521,49 @@ async def recognize_structure(
         except Exception:
             continue
 
+    # ── Catálogo de códigos como texto para o prompt ─────────────────────────
+    catalog_lines: list[str] = []
+    if all_mt_codes:
+        catalog_lines.append(f"Códigos MT disponíveis: {', '.join(sorted(all_mt_codes))}")
+    if all_bt_codes:
+        catalog_lines.append(f"Códigos BT disponíveis: {', '.join(sorted(all_bt_codes))}")
+    if all_pole_sizes:
+        catalog_lines.append(f"Tamanhos de poste no catálogo: {', '.join(sorted(all_pole_sizes))}")
+    catalog_text = "\n".join(catalog_lines) if catalog_lines else ""
+
     # ── Monta conteúdo da mensagem ───────────────────────────────────────────
     content_parts: list[dict] = []
 
     if visual_examples:
-        content_parts.append({
-            "type": "text",
-            "text": (
-                f"Você é um especialista em redes elétricas Equatorial.\n"
-                f"Veja {len(visual_examples)} foto(s) de treinamento que você já aprendeu:\n"
-            ),
-        })
+        intro = (
+            "Você é um especialista em redes elétricas Equatorial.\n"
+            f"Abaixo estão {len(visual_examples)} fotos de treinamento com seus códigos corretos.\n"
+            "Memorize o padrão visual de cada código:\n"
+        )
+        if catalog_text:
+            intro += f"\n{catalog_text}\n"
+        content_parts.append({"type": "text", "text": intro})
+
         for label, ex_b64 in visual_examples:
             content_parts.append({
                 "type": "image",
                 "source": {"type": "base64", "media_type": "image/jpeg", "data": ex_b64},
             })
-            content_parts.append({"type": "text", "text": f"↑ {label}\n"})
+            content_parts.append({"type": "text", "text": f"↑ CÓDIGO: {label}\n"})
 
-        content_parts.append({"type": "text", "text": RECOGNIZE_FINAL_PROMPT})
+        # Injeta catálogo no prompt final
+        final_prompt = RECOGNIZE_FINAL_PROMPT
+        if catalog_text:
+            final_prompt = final_prompt.replace(
+                "Retorne APENAS JSON válido:",
+                f"VOCÊ DEVE usar um dos códigos do catálogo acima.\n{catalog_text}\n\nRetorne APENAS JSON válido:"
+            )
+        content_parts.append({"type": "text", "text": final_prompt})
     else:
-        content_parts.append({"type": "text", "text": RECOGNIZE_NO_EXAMPLES_PROMPT})
+        prompt = RECOGNIZE_NO_EXAMPLES_PROMPT
+        if catalog_text:
+            prompt += f"\n\nCatálogo disponível:\n{catalog_text}"
+        content_parts.append({"type": "text", "text": prompt})
 
     # Imagem de teste — sempre por último
     content_parts.append({
