@@ -355,80 +355,84 @@ def _case_label(inp: dict, exp: dict, human_notes: str) -> str:
 
 RECOGNIZE_FINAL_PROMPT = """=== NOVA FOTO PARA ANALISAR ===
 
-PASSO 1 — Leia TODO texto visível na imagem (cantos, rodapé, sobreposições):
-  Procure por: "Poste:", "Projeto:", "N°", número de 8 dígitos, bitola (ex: 10/300, 12/600),
-  sufixo de tipo (DT=duplo T, DP=duplo P, ST=simples T, SP=simples P), coordenadas GPS.
-  Mesmo que a placa física do poste não seja legível, o app de campo costuma imprimir
-  essas informações como texto na própria foto.
+ATENÇÃO: Identifique SOMENTE pelo que você vê fisicamente na foto. Ignore qualquer texto sobreposto,
+legendas, watermarks ou metadados — eles podem estar incorretos. Confie apenas na imagem real.
 
-PASSO 2 — Identifique a estrutura elétrica no topo do poste:
-  Compare com os exemplos de treinamento acima. Que código MT/BT ela mais se parece?
-  Observe: cruzetas, isoladores, número de braços, posição dos fios.
+PASSO 1 — Número e tamanho do poste (visual):
+  - Procure a PLACA AMARELA ou marcação ESTAMPADA NO CONCRETO do poste
+  - Leia o número físico gravado/pintado diretamente no poste
+  - O tamanho (bitola) às vezes está estampado no poste (ex: 10/300 DT)
+  - Se não conseguir ler visualmente → numero_poste: null
 
-PASSO 3 — Retorne APENAS um JSON válido com os campos abaixo.
-  Se a foto mostra um poste COM estrutura elétrica, preencha AMBOS:
-  "numero_poste" (o número do poste) E "estrutura_mt"/"estrutura_bt" (o código da estrutura).
-
-{
-  "tipo": "poste_com_estrutura",
-  "numero_poste": "88058872",
-  "tamanho_poste": "10/300 DT",
-  "estrutura_mt": "UP1",
-  "estrutura_bt": null,
-  "conformidade": true,
-  "confianca": 0.88,
-  "descricao": "Poste 88058872 com estrutura MT UP1 duplo T",
-  "observacoes": "Número lido do texto sobreposto na foto. Estrutura conforme."
-}
-
-Tipos possíveis:
-  "poste"              — só o poste, sem estrutura identificável
-  "poste_com_estrutura"— poste + estrutura MT e/ou BT
-  "estrutura_mt"       — foto focada na estrutura MT (sem poste no frame)
-  "estrutura_bt"       — foto focada na estrutura BT
-  "estrutura_mt_bt"    — MT e BT juntos
-  "desconhecido"       — não conseguiu identificar
-
-Campos obrigatórios:
-  numero_poste  → número do poste (8 dígitos geralmente) — leia do texto na foto; null se não encontrar
-  tamanho_poste → bitola/altura ex: "10/300 DT", "12/600 DP" — leia do texto; null se não encontrar
-  estrutura_mt  → código MT (ex: UP1, UP4, N1, S3I) baseado nos exemplos; null se não houver
-  estrutura_bt  → código BT (ex: R1, R3, BT-01) baseado nos exemplos; null se não houver
-  conformidade  → true/false/null
-  confianca     → 0.0 a 1.0 (quanto você tem certeza da identificação)
-"""
-
-RECOGNIZE_NO_EXAMPLES_PROMPT = """Você é um especialista em redes elétricas da Equatorial Goiás.
-Analise esta foto de campo de inspeção de postes/estruturas.
-
-PASSO 1 — Leia TODO texto visível na imagem:
-  As fotos do app de campo geralmente têm texto impresso nos cantos com:
-  "Poste: XXXXXXXX" (número do poste), bitola (ex: 10/300 DT, 12/600 DP),
-  coordenadas GPS, nome do projeto, viabilizador.
-  LEIA ESSE TEXTO MESMO QUE O POSTE ESTEJA DISTANTE.
-
-PASSO 2 — Identifique a estrutura elétrica:
-  Observe cruzetas, isoladores, braços, disposição dos cabos no topo do poste.
-  Classifique o tipo de estrutura conforme normas Equatorial Goiás.
+PASSO 2 — Estrutura elétrica (compare com os exemplos de treinamento acima):
+  - Observe o TOPO do poste: cruzetas, isoladores, braços, disposição dos cabos
+  - Compare a configuração visual com os exemplos que você viu
+  - Qual código dos exemplos essa estrutura mais se parece?
+  - MT: estruturas de média tensão (fios mais grossos, cruzetas maiores, isoladores grandes)
+  - BT: estruturas de baixa tensão (fios menores, sem cruzeta grande ou com braço menor)
 
 Retorne APENAS JSON válido:
 {
   "tipo": "poste_com_estrutura",
-  "numero_poste": "88058872",
+  "numero_poste": null,
+  "tamanho_poste": "10/300 DT",
+  "estrutura_mt": "UP1",
+  "estrutura_bt": null,
+  "conformidade": true,
+  "confianca": 0.82,
+  "descricao": "Poste duplo T com estrutura MT similar ao exemplo UP1",
+  "observacoes": "Placa não legível à distância. Estrutura identificada visualmente pelo padrão de cruzeta."
+}
+
+Tipos:
+  "poste"               — só o poste, estrutura não identificável
+  "poste_com_estrutura" — poste + estrutura MT e/ou BT identificada
+  "estrutura_mt"        — foto focada na estrutura MT
+  "estrutura_bt"        — foto focada na estrutura BT
+  "estrutura_mt_bt"     — MT e BT juntos
+  "desconhecido"        — não conseguiu identificar
+
+Campos:
+  numero_poste  → número físico lido da placa/concreto do poste — null se não visível
+  tamanho_poste → bitola/altura lida do poste — null se não visível
+  estrutura_mt  → código MT baseado nos exemplos visuais (ex: UP1, UP4, N1) — null se não houver
+  estrutura_bt  → código BT baseado nos exemplos visuais (ex: R1, R3) — null se não houver
+  conformidade  → true se conforme com padrão Equatorial, false se não, null se não dá pra avaliar
+  confianca     → 0.0 a 1.0
+"""
+
+RECOGNIZE_NO_EXAMPLES_PROMPT = """Você é um especialista em redes elétricas da Equatorial Goiás.
+Analise esta foto de inspeção de campo.
+
+ATENÇÃO: Identifique SOMENTE pelo que você vê fisicamente na foto.
+Ignore qualquer texto sobreposto, legendas, watermarks ou metadados da câmera — podem estar incorretos.
+
+PASSO 1 — Número e tamanho do poste:
+  Procure a placa amarela ou marcação estampada fisicamente no concreto.
+  Se não for possível ler visualmente → numero_poste: null
+
+PASSO 2 — Estrutura elétrica:
+  Observe cruzetas, isoladores, braços, disposição dos fios no topo do poste.
+  Classifique conforme normas Equatorial Goiás (MT = média tensão, BT = baixa tensão).
+
+Retorne APENAS JSON válido:
+{
+  "tipo": "poste_com_estrutura",
+  "numero_poste": null,
   "tamanho_poste": "10/300 DT",
   "estrutura_mt": "UP1",
   "estrutura_bt": null,
   "conformidade": null,
-  "confianca": 0.75,
-  "descricao": "Poste 88058872 identificado pelo texto da foto. Estrutura MT tipo duplo T.",
-  "observacoes": "Sem casos de treinamento para comparar. Classificação baseada em visual."
+  "confianca": 0.60,
+  "descricao": "Poste duplo T com estrutura MT. Placa não legível à distância.",
+  "observacoes": "Sem exemplos de treinamento para comparar. Identificação visual apenas."
 }
 
 Campos:
-  numero_poste  → número do poste lido do texto sobreposto — null se não houver
-  tamanho_poste → ex: "10/300 DT" — null se não visível
-  estrutura_mt  → código da estrutura MT — null se não houver estrutura MT
-  estrutura_bt  → código da estrutura BT — null se não houver estrutura BT
+  numero_poste  → número físico da placa/concreto — null se não visível
+  tamanho_poste → bitola física do poste — null se não visível
+  estrutura_mt  → código MT (UP1, UP4, N1, S3I…) — null se não houver
+  estrutura_bt  → código BT (R1, R3…) — null se não houver
   conformidade  → true/false/null
   confianca     → 0.0 a 1.0
 """
