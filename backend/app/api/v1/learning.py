@@ -267,9 +267,10 @@ async def detect_structure(
     b64 = base64.standard_b64encode(img_bytes).decode()
     prompt = DETECT_PROMPT.format(label=label)
 
-    api_key = settings.ANTHROPIC_API_KEY
+    import os as _os
+    api_key = settings.ANTHROPIC_API_KEY or _os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        raise HTTPException(500, "ANTHROPIC_API_KEY não configurada")
+        raise HTTPException(500, "ANTHROPIC_API_KEY não configurada — adicione ao .env e reinicie o backend")
 
     client = AsyncAnthropic(api_key=api_key)
     try:
@@ -420,9 +421,10 @@ async def recognize_structure(
     img_bytes = _resize_image(content, max_px=1200)
     b64_test = base64.standard_b64encode(img_bytes).decode()
 
-    api_key = settings.ANTHROPIC_API_KEY
+    import os as _os
+    api_key = settings.ANTHROPIC_API_KEY or _os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        raise HTTPException(500, "ANTHROPIC_API_KEY não configurada")
+        raise HTTPException(500, "ANTHROPIC_API_KEY não configurada — adicione ao .env e reinicie o backend")
 
     # ── Carrega casos de treinamento ─────────────────────────────────────────
     rows = (await db.execute(

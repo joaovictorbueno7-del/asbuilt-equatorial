@@ -1,12 +1,54 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import List
+import os
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Project root = parents[3] from backend/app/core/config.py
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-_ENV_FILE = _PROJECT_ROOT / ".env"
+
+def _find_env_file() -> str:
+    """Procura o .env em vários locais possíveis (robusto contra caminhos com acentos)."""
+    candidates = [
+        # A partir do diretório do config.py subindo
+        Path(__file__).resolve().parents[3] / ".env",
+        # A partir do cwd (quando uvicorn roda dentro de /backend)
+        Path.cwd() / ".env",
+        Path.cwd().parent / ".env",
+        # Relativo ao script
+        Path(__file__).parent / "../../../../.env",
+    ]
+    for p in candidates:
+        try:
+            if p.resolve().is_file():
+                return str(p.resolve())
+        except Exception:
+            continue
+    return ".env"  # fallback — pydantic-settings tentará no cwd
+
+
+_ENV_FILE = _find_env_file()
+
+
+# ── Carrega .env manualmente antes do pydantic-settings ──────────────────────
+# Necessário no Windows quando o caminho contém caracteres especiais (ã, ç…)
+# que podem fazer o pydantic-settings falhar ao ler o arquivo silenciosamente.
+def _load_env_manually(env_path: str) -> None:
+    try:
+        with open(env_path, encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:   # não sobrescreve vars já definidas
+                    os.environ[key] = value
+    except Exception:
+        pass
+
+
+_load_env_manually(_ENV_FILE)
 
 
 class Settings(BaseSettings):
