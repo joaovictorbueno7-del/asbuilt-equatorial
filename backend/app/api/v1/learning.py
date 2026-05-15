@@ -313,3 +313,165 @@ async def detect_structure(
         "confidence": float(result.get("confidence", 0)),
         "description": str(result.get("description", ""))[:200],
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reconhecimento: Claude usa os casos de treinamento para identificar a foto
+# ─────────────────────────────────────────────────────────────────────────────
+
+RECOGNIZE_PROMPT = """Você é um agente especialista em inspeção de redes elétricas de distribuição da Equatorial.
+
+Você foi treinado com {n_cases} caso(s) real(is) de campo que lhe ensinaram a identificar postes, estruturas MT e BT:{cases_text}
+
+Analise a NOVA foto enviada e responda com base no seu treinamento:
+1. O que esta foto mostra? (poste de concreto com placa/número, ou estrutura elétrica MT/BT?)
+2. Qual é o número, código ou identificação visível?
+3. A instalação está conforme com as normas Equatorial?
+
+Retorne APENAS um JSON válido (nada antes ou depois):
+{{
+  "tipo": "poste",
+  "codigo": "88058873",
+  "tamanho": "10/300 DT",
+  "conformidade": true,
+  "confianca": 0.87,
+  "descricao": "Poste de concreto com placa amarela identificada",
+  "observacoes": "Estrutura em boas condições, número legível"
+}}
+
+Tipos possíveis: "poste", "estrutura_mt", "estrutura_bt", "estrutura_mt_bt", "desconhecido"
+- Para poste: preencha "codigo" com o número e "tamanho" com bitola/altura se visível
+- Para estrutura: preencha "codigo" com os códigos MT/BT (ex: "UP4", "R3")
+- conformidade: true se estiver conforme com o padrão Equatorial, false se não, null se não der para avaliar
+- confianca: entre 0.0 e 1.0
+"""
+
+
+def _build_cases_text(cases: list) -> str:
+    """Formata os casos de treinamento como texto para o prompt."""
+    if not cases:
+        return "\n(Nenhum caso de treinamento ainda)"
+    lines = []
+    for r in cases:
+        inp = r.input_payload or {}
+        exp = r.expected_output or {}
+        codes = inp.get("structure_codes", [])
+        pole_size = inp.get("pole_size", "")
+        conf = "Conforme" if exp.get("conformidade", True) else "Não conforme"
+        notes = r.human_notes or ""
+
+        # Classifica o tipo
+        has_poste = any(c.startswith("POSTE") for c in codes)
+        has_mt = any(c.startswith("MT:") for c in codes)
+        has_bt = any(c.startswith("BT:") for c in codes)
+
+        if has_poste:
+            num = next((c.replace("POSTE:", "Nº") for c in codes if c.startswith("POSTE")), "")
+            size_str = f" · {pole_size}" if pole_size else ""
+            line = f"  • [Poste] {num}{size_str} → {conf}"
+        elif has_mt and has_bt:
+            mt = [c.replace("MT:", "") for c in codes if c.startswith("MT:")]
+            bt = [c.replace("BT:", "") for c in codes if c.startswith("BT:")]
+            line = f"  • [Estrutura MT+BT] MT:{','.join(mt)} / BT:{','.join(bt)} → {conf}"
+        elif has_mt:
+            mt = [c.replace("MT:", "") for c in codes if c.startswith("MT:")]
+            line = f"  • [Estrutura MT] {','.join(mt)} → {conf}"
+        elif has_bt:
+            bt = [c.replace("BT:", "") for c in codes if c.startswith("BT:")]
+            line = f"  • [Estrutura BT] {','.join(bt)} → {conf}"
+        else:
+            line = f"  • {', '.join(codes)} → {conf}"
+
+        if notes:
+            line += f" ({notes[:80]})"
+        lines.append(line)
+
+    return "\n" + "\n".join(lines)
+
+
+@router.post("/recognize")
+async def recognize_structure(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Analisa foto usando Claude Vision + casos de treinamento do tenant."""
+    import base64, json, re
+    from anthropic import AsyncAnthropic
+    from app.core.config import settings
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "Arquivo vazio")
+
+    img_bytes = _resize_image(content, max_px=1200)
+    b64 = base64.standard_b64encode(img_bytes).decode()
+
+    # Carrega casos de treinamento do tenant (últimos 100)
+    rows = (await db.execute(
+        select(LearningCase)
+        .where(
+            LearningCase.tenant_id == user.tenant_id,
+            LearningCase.agent_code == "kmz_analyzer",
+        )
+        .order_by(desc(LearningCase.created_at))
+        .limit(100)
+    )).scalars().all()
+
+    cases_text = _build_cases_text(list(rows))
+    prompt = RECOGNIZE_PROMPT.format(n_cases=len(rows), cases_text=cases_text)
+
+    api_key = settings.ANTHROPIC_API_KEY
+    if not api_key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY não configurada")
+
+    client = AsyncAnthropic(api_key=api_key)
+    try:
+        msg = await client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=500,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": b64,
+                    }},
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Erro Vision: {e}")
+
+    text = "".join(getattr(b, "text", "") for b in msg.content)
+    m = re.search(r"\{[\s\S]*\}", text)
+    if not m:
+        return {
+            "tipo": "desconhecido", "codigo": None, "tamanho": None,
+            "conformidade": None, "confianca": 0,
+            "descricao": "Sem resposta da IA", "observacoes": "",
+            "n_cases_used": len(rows),
+        }
+
+    try:
+        result = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return {
+            "tipo": "desconhecido", "codigo": None, "tamanho": None,
+            "conformidade": None, "confianca": 0,
+            "descricao": "Resposta inválida da IA", "observacoes": "",
+            "n_cases_used": len(rows),
+        }
+
+    return {
+        "tipo": str(result.get("tipo", "desconhecido")),
+        "codigo": result.get("codigo"),
+        "tamanho": result.get("tamanho"),
+        "conformidade": result.get("conformidade"),
+        "confianca": float(result.get("confianca", 0)),
+        "descricao": str(result.get("descricao", ""))[:300],
+        "observacoes": str(result.get("observacoes", ""))[:300],
+        "n_cases_used": len(rows),
+    }

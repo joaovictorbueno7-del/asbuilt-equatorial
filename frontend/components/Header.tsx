@@ -51,6 +51,12 @@ export default function Header({ user }: { user: { full_name: string; email: str
           >
             Treinar
           </Link>
+          <Link
+            href="/testar"
+            className="text-sm px-3 py-1.5 rounded-lg border border-accent/40 bg-accent/10 text-accent font-semibold hover:bg-accent/20 transition hidden md:inline-block"
+          >
+            Testar
+          </Link>
           <NotificationBell />
           <LogoutButton />
         </div>
