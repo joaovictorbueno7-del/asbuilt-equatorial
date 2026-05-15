@@ -369,14 +369,15 @@ function KmzTab() {
     fd.append("municipio", municipio.trim());
 
     try {
-      const r = await fetch("/api/works", { method: "POST", body: fd });
+      // Usa /api/pipelines que cria PipelineRun (compatível com /pipelines/[id])
+      const r = await fetch("/api/pipelines", { method: "POST", body: fd });
       const data = await r.json();
       if (!r.ok) {
         setError(data.detail || data.error || `Erro ${r.status}`);
         return;
       }
       // Redireciona para a página da pipeline
-      router.push(`/pipelines/${data.run_id}`);
+      router.push(`/pipelines/${data.id}`);
     } catch {
       setError("Falha de rede");
     } finally {
