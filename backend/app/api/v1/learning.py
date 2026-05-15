@@ -353,52 +353,84 @@ def _case_label(inp: dict, exp: dict, human_notes: str) -> str:
     return label + suffix
 
 
-RECOGNIZE_FINAL_PROMPT = """=== NOVA FOTO ===
-Analise esta foto com base nos exemplos acima e responda:
-1. O que é? (poste, estrutura MT, BT, MT+BT ou desconhecido?)
-2. Qual número/código está visível?
-3. Está conforme com padrão Equatorial?
+RECOGNIZE_FINAL_PROMPT = """=== NOVA FOTO PARA ANALISAR ===
 
-Retorne APENAS JSON válido:
+PASSO 1 — Leia TODO texto visível na imagem (cantos, rodapé, sobreposições):
+  Procure por: "Poste:", "Projeto:", "N°", número de 8 dígitos, bitola (ex: 10/300, 12/600),
+  sufixo de tipo (DT=duplo T, DP=duplo P, ST=simples T, SP=simples P), coordenadas GPS.
+  Mesmo que a placa física do poste não seja legível, o app de campo costuma imprimir
+  essas informações como texto na própria foto.
+
+PASSO 2 — Identifique a estrutura elétrica no topo do poste:
+  Compare com os exemplos de treinamento acima. Que código MT/BT ela mais se parece?
+  Observe: cruzetas, isoladores, número de braços, posição dos fios.
+
+PASSO 3 — Retorne APENAS um JSON válido com os campos abaixo.
+  Se a foto mostra um poste COM estrutura elétrica, preencha AMBOS:
+  "numero_poste" (o número do poste) E "estrutura_mt"/"estrutura_bt" (o código da estrutura).
+
 {
-  "tipo": "poste",
-  "codigo": "88058873",
-  "tamanho": "10/300 DT",
+  "tipo": "poste_com_estrutura",
+  "numero_poste": "88058872",
+  "tamanho_poste": "10/300 DT",
+  "estrutura_mt": "UP1",
+  "estrutura_bt": null,
   "conformidade": true,
-  "confianca": 0.87,
-  "descricao": "Poste de concreto com placa amarela Nº 88058873",
-  "observacoes": "Número bem legível, estrutura aparentemente conforme"
+  "confianca": 0.88,
+  "descricao": "Poste 88058872 com estrutura MT UP1 duplo T",
+  "observacoes": "Número lido do texto sobreposto na foto. Estrutura conforme."
 }
 
-Tipos: "poste", "estrutura_mt", "estrutura_bt", "estrutura_mt_bt", "desconhecido"
-Regras:
-- codigo: número do poste ou códigos MT/BT (ex: UP4, N1, R3) — null se ilegível
-- tamanho: bitola/altura do poste (ex: 10/300 DT) — null se não for poste ou ilegível
-- conformidade: true/false/null
-- confianca: 0.0 a 1.0
+Tipos possíveis:
+  "poste"              — só o poste, sem estrutura identificável
+  "poste_com_estrutura"— poste + estrutura MT e/ou BT
+  "estrutura_mt"       — foto focada na estrutura MT (sem poste no frame)
+  "estrutura_bt"       — foto focada na estrutura BT
+  "estrutura_mt_bt"    — MT e BT juntos
+  "desconhecido"       — não conseguiu identificar
+
+Campos obrigatórios:
+  numero_poste  → número do poste (8 dígitos geralmente) — leia do texto na foto; null se não encontrar
+  tamanho_poste → bitola/altura ex: "10/300 DT", "12/600 DP" — leia do texto; null se não encontrar
+  estrutura_mt  → código MT (ex: UP1, UP4, N1, S3I) baseado nos exemplos; null se não houver
+  estrutura_bt  → código BT (ex: R1, R3, BT-01) baseado nos exemplos; null se não houver
+  conformidade  → true/false/null
+  confianca     → 0.0 a 1.0 (quanto você tem certeza da identificação)
 """
 
-RECOGNIZE_NO_EXAMPLES_PROMPT = """Você é um especialista em redes elétricas Equatorial.
-Analise esta foto de campo e identifique o que é.
+RECOGNIZE_NO_EXAMPLES_PROMPT = """Você é um especialista em redes elétricas da Equatorial Goiás.
+Analise esta foto de campo de inspeção de postes/estruturas.
+
+PASSO 1 — Leia TODO texto visível na imagem:
+  As fotos do app de campo geralmente têm texto impresso nos cantos com:
+  "Poste: XXXXXXXX" (número do poste), bitola (ex: 10/300 DT, 12/600 DP),
+  coordenadas GPS, nome do projeto, viabilizador.
+  LEIA ESSE TEXTO MESMO QUE O POSTE ESTEJA DISTANTE.
+
+PASSO 2 — Identifique a estrutura elétrica:
+  Observe cruzetas, isoladores, braços, disposição dos cabos no topo do poste.
+  Classifique o tipo de estrutura conforme normas Equatorial Goiás.
 
 Retorne APENAS JSON válido:
 {
-  "tipo": "poste",
-  "codigo": "88058873",
-  "tamanho": "10/300 DT",
-  "conformidade": true,
-  "confianca": 0.87,
-  "descricao": "Poste de concreto com placa amarela identificada",
-  "observacoes": "Estrutura em boas condições"
+  "tipo": "poste_com_estrutura",
+  "numero_poste": "88058872",
+  "tamanho_poste": "10/300 DT",
+  "estrutura_mt": "UP1",
+  "estrutura_bt": null,
+  "conformidade": null,
+  "confianca": 0.75,
+  "descricao": "Poste 88058872 identificado pelo texto da foto. Estrutura MT tipo duplo T.",
+  "observacoes": "Sem casos de treinamento para comparar. Classificação baseada em visual."
 }
 
-Tipos: "poste", "estrutura_mt", "estrutura_bt", "estrutura_mt_bt", "desconhecido"
-- Para postes: leia a placa amarela ou marcação estampada no concreto
-- Para estruturas MT/BT: identifique cruzetas, isoladores, ferros conforme norma Equatorial
-- codigo: número do poste ou código da estrutura — null se não visível
-- tamanho: bitola/altura (ex: 10/300 DT, 12/600 DP) — null se não for poste
-- conformidade: true/false/null
-- confianca: 0.0 a 1.0
+Campos:
+  numero_poste  → número do poste lido do texto sobreposto — null se não houver
+  tamanho_poste → ex: "10/300 DT" — null se não visível
+  estrutura_mt  → código da estrutura MT — null se não houver estrutura MT
+  estrutura_bt  → código da estrutura BT — null se não houver estrutura BT
+  conformidade  → true/false/null
+  confianca     → 0.0 a 1.0
 """
 
 
@@ -496,34 +528,51 @@ async def recognize_structure(
 
     raw_text = "".join(getattr(b, "text", "") for b in msg.content)
 
-    # Extrai JSON da resposta
-    m = re.search(r"\{[\s\S]*?\}", raw_text)
+    # Extrai JSON da resposta (greedy para pegar o JSON completo)
+    m = re.search(r"\{[\s\S]*\}", raw_text)
+    _empty = {
+        "tipo": "desconhecido", "numero_poste": None, "tamanho_poste": None,
+        "estrutura_mt": None, "estrutura_bt": None,
+        # campos legados para compatibilidade
+        "codigo": None, "tamanho": None,
+        "conformidade": None, "confianca": 0,
+        "descricao": "IA não retornou JSON",
+        "observacoes": raw_text[:200],
+        "n_cases_used": len(rows),
+        "visual_examples": len(visual_examples),
+    }
     if not m:
-        return {
-            "tipo": "desconhecido", "codigo": None, "tamanho": None,
-            "conformidade": None, "confianca": 0,
-            "descricao": "IA não retornou JSON",
-            "observacoes": raw_text[:200],
-            "n_cases_used": len(rows),
-            "visual_examples": len(visual_examples),
-        }
+        return _empty
 
     try:
         result = json.loads(m.group(0))
     except json.JSONDecodeError:
-        return {
-            "tipo": "desconhecido", "codigo": None, "tamanho": None,
-            "conformidade": None, "confianca": 0,
-            "descricao": "JSON inválido na resposta",
-            "observacoes": raw_text[:200],
-            "n_cases_used": len(rows),
-            "visual_examples": len(visual_examples),
-        }
+        _empty["descricao"] = "JSON inválido na resposta"
+        return _empty
+
+    # Normaliza — suporta tanto formato novo (numero_poste/estrutura_mt)
+    # quanto formato antigo (codigo/tamanho) para retrocompatibilidade
+    numero_poste = result.get("numero_poste") or result.get("codigo")
+    tamanho_poste = result.get("tamanho_poste") or result.get("tamanho")
+    estrutura_mt = result.get("estrutura_mt")
+    estrutura_bt = result.get("estrutura_bt")
+
+    # "codigo" legado: se tipo for estrutura e não tem numero_poste, codigo é a estrutura
+    tipo = str(result.get("tipo", "desconhecido"))
+    if not estrutura_mt and tipo in ("estrutura_mt", "estrutura_mt_bt"):
+        estrutura_mt = result.get("codigo")
+    if not estrutura_bt and tipo in ("estrutura_bt", "estrutura_mt_bt"):
+        estrutura_bt = result.get("codigo")
 
     return {
-        "tipo": str(result.get("tipo", "desconhecido")),
-        "codigo": result.get("codigo"),
-        "tamanho": result.get("tamanho"),
+        "tipo": tipo,
+        "numero_poste": str(numero_poste) if numero_poste else None,
+        "tamanho_poste": str(tamanho_poste) if tamanho_poste else None,
+        "estrutura_mt": str(estrutura_mt) if estrutura_mt else None,
+        "estrutura_bt": str(estrutura_bt) if estrutura_bt else None,
+        # legado
+        "codigo": str(numero_poste or estrutura_mt or estrutura_bt or "") or None,
+        "tamanho": str(tamanho_poste) if tamanho_poste else None,
         "conformidade": result.get("conformidade"),
         "confianca": float(result.get("confianca", 0)),
         "descricao": str(result.get("descricao", ""))[:300],

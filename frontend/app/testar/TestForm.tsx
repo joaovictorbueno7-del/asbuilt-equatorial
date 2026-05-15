@@ -7,6 +7,11 @@ import { useRouter } from "next/navigation";
 
 type RecognizeResult = {
   tipo: string;
+  numero_poste: string | null;
+  tamanho_poste: string | null;
+  estrutura_mt: string | null;
+  estrutura_bt: string | null;
+  // legado
   codigo: string | null;
   tamanho: string | null;
   conformidade: boolean | null;
@@ -22,11 +27,12 @@ type Tab = "foto" | "kmz";
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 const TIPO_INFO: Record<string, { icon: string; label: string; color: string }> = {
-  poste:           { icon: "🪵", label: "Poste",           color: "text-amber-300" },
-  estrutura_mt:    { icon: "⚡", label: "Estrutura MT",    color: "text-orange-300" },
-  estrutura_bt:    { icon: "⚡", label: "Estrutura BT",    color: "text-blue-300" },
-  estrutura_mt_bt: { icon: "⚡", label: "Estrutura MT+BT", color: "text-purple-300" },
-  desconhecido:    { icon: "❓", label: "Não identificado", color: "text-slate-400" },
+  poste:                { icon: "🪵", label: "Poste",                 color: "text-amber-300" },
+  poste_com_estrutura:  { icon: "⚡", label: "Poste + Estrutura",     color: "text-cyan-300" },
+  estrutura_mt:         { icon: "⚡", label: "Estrutura MT",          color: "text-orange-300" },
+  estrutura_bt:         { icon: "⚡", label: "Estrutura BT",          color: "text-blue-300" },
+  estrutura_mt_bt:      { icon: "⚡", label: "Estrutura MT+BT",       color: "text-purple-300" },
+  desconhecido:         { icon: "❓", label: "Não identificado",       color: "text-slate-400" },
 };
 
 // ── Componente principal ──────────────────────────────────────────────────────
@@ -234,15 +240,43 @@ function FotoTab() {
         <div className="bg-bg-card border border-grid-line rounded-2xl overflow-hidden">
           {/* Header */}
           <div className="px-6 pt-5 pb-4 border-b border-grid-line flex items-start justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <span className="text-3xl">{tipoInfo?.icon}</span>
-              <div>
-                <div className={`text-lg font-bold ${tipoInfo?.color}`}>{tipoInfo?.label}</div>
-                {result.codigo && (
-                  <div className="text-white font-mono text-sm mt-0.5">
-                    {result.tipo === "poste" ? "Nº " : ""}{result.codigo}
-                    {result.tamanho && <span className="text-slate-400 ml-2">· {result.tamanho}</span>}
+            <div className="flex items-center gap-3 min-w-0">
+              <span className="text-3xl flex-shrink-0">{tipoInfo?.icon}</span>
+              <div className="min-w-0">
+                <div className={`text-base font-bold ${tipoInfo?.color}`}>{tipoInfo?.label}</div>
+                {/* Poste */}
+                {result.numero_poste && (
+                  <div className="text-white font-mono text-sm mt-1 flex items-center gap-2 flex-wrap">
+                    <span className="text-slate-500 text-xs">Nº</span>
+                    <span className="font-bold">{result.numero_poste}</span>
+                    {result.tamanho_poste && (
+                      <span className="text-amber-300 text-xs bg-amber-900/30 border border-amber-700/30 px-2 py-0.5 rounded">
+                        {result.tamanho_poste}
+                      </span>
+                    )}
                   </div>
+                )}
+                {/* Estrutura MT */}
+                {result.estrutura_mt && (
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="text-[10px] text-slate-500">MT</span>
+                    <span className="text-orange-300 font-mono font-bold text-sm bg-orange-900/20 border border-orange-700/30 px-2 py-0.5 rounded">
+                      {result.estrutura_mt}
+                    </span>
+                  </div>
+                )}
+                {/* Estrutura BT */}
+                {result.estrutura_bt && (
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="text-[10px] text-slate-500">BT</span>
+                    <span className="text-blue-300 font-mono font-bold text-sm bg-blue-900/20 border border-blue-700/30 px-2 py-0.5 rounded">
+                      {result.estrutura_bt}
+                    </span>
+                  </div>
+                )}
+                {/* Fallback para formato legado */}
+                {!result.numero_poste && !result.estrutura_mt && !result.estrutura_bt && result.codigo && (
+                  <div className="text-white font-mono text-sm mt-0.5">{result.codigo}</div>
                 )}
               </div>
             </div>
