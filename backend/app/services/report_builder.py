@@ -44,6 +44,10 @@ _BLUE_HEX = "005FAF"
 
 _MAX_IMG_BYTES = 8 * 1024 * 1024  # 8 MB
 
+# Logo Equatorial (PNG com fundo transparente, 2560×742 px)
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+_LOGO_EQUATORIAL = _STATIC_DIR / "logo_equatorial.png"
+
 
 def _reports_dir() -> Path:
     """Diretório de saída — avaliado em tempo de execução para respeitar env vars."""
@@ -288,17 +292,25 @@ def _add_header(doc: Document, tipo: str, parceira: str) -> None:
     for col in range(3):
         _remove_cell_borders(htable.cell(0, col))
 
-    # ── Coluna 0: Logo / "equatorial" ─────────────────────────────────────────
+    # ── Coluna 0: Logo Equatorial (imagem PNG) ou texto fallback ─────────────
     c0 = htable.cell(0, 0)
     c0.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
     p0 = c0.paragraphs[0]
     p0.alignment = WD_ALIGN_PARAGRAPH.LEFT
     p0.paragraph_format.space_before = Pt(2)
     p0.paragraph_format.space_after = Pt(2)
-    r0 = p0.add_run("equatorial")
-    r0.bold = True
-    r0.font.size = Pt(12)
-    r0.font.color.rgb = _BLUE
+
+    if _LOGO_EQUATORIAL.is_file():
+        # Insere imagem PNG com fundo transparente
+        # Largura = 3.0 cm; altura calculada automaticamente mantendo proporção
+        run_logo = p0.add_run()
+        run_logo.add_picture(str(_LOGO_EQUATORIAL), width=Cm(3.0))
+    else:
+        # Fallback textual
+        r0 = p0.add_run("equatorial")
+        r0.bold = True
+        r0.font.size = Pt(12)
+        r0.font.color.rgb = _BLUE
 
     # ── Coluna 1: Título (3 linhas) ───────────────────────────────────────────
     c1 = htable.cell(0, 1)
@@ -630,10 +642,30 @@ def _draw_pdf_header(canvas, meta: dict) -> None:
 
     mid_y = (top_y + bot_y) / 2
 
-    # ── Logo esquerda ─────────────────────────────────────────────────────────
-    canvas.setFont("Helvetica-Bold", 12)
-    canvas.setFillColorRGB(0.0, 0.373, 0.686)
-    canvas.drawString(margin + 6, mid_y - 5, meta["equatorial"])
+    # ── Logo esquerda (imagem PNG ou texto fallback) ──────────────────────────
+    logo_path = str(_LOGO_EQUATORIAL)
+    logo_w = 2.8 * rl_cm   # largura do logo no PDF
+    logo_h = logo_w / 3.45  # proporção 2560:742 ≈ 3.45
+    logo_y = mid_y - logo_h / 2
+
+    if _LOGO_EQUATORIAL.is_file():
+        try:
+            canvas.drawImage(
+                logo_path,
+                margin + 2, logo_y,
+                width=logo_w, height=logo_h,
+                preserveAspectRatio=True,
+                mask="auto",   # respeita canal alpha do PNG
+            )
+        except Exception:
+            # Fallback para texto se a imagem falhar
+            canvas.setFont("Helvetica-Bold", 12)
+            canvas.setFillColorRGB(0.0, 0.373, 0.686)
+            canvas.drawString(margin + 6, mid_y - 5, meta["equatorial"])
+    else:
+        canvas.setFont("Helvetica-Bold", 12)
+        canvas.setFillColorRGB(0.0, 0.373, 0.686)
+        canvas.drawString(margin + 6, mid_y - 5, meta["equatorial"])
 
     # ── Título centralizado ───────────────────────────────────────────────────
     lines = meta["title_lines"]
@@ -669,47 +701,81 @@ def _draw_pdf_header(canvas, meta: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def extract_structures_from_run(output_payload: dict, kmz_path: str | None = None) -> list[dict]:
-    """Converte output_payload do AgentRun em lista de estruturas para o relatório."""
-    structures = []
-    placemarks = output_payload.get("placemarks") or output_payload.get("structures") or []
+    """Converte output_payload do AgentRun/pipeline em lista de estruturas para o relatório.
 
-    for pm in placemarks:
-        name = pm.get("name") or pm.get("placemark_name") or "—"
-        photos = pm.get("photos") or pm.get("images") or []
+    Suporta dois formatos:
+    - Formato legado:  [{name, photos/images, estruturas_confirmadas, ...}]
+    - Formato pipeline: [{image, analysis:{...}, placemark:{name,...}}]
+    """
+    raw = output_payload.get("placemarks") or output_payload.get("structures") or []
+    result: list[dict] = []
 
-        # Códigos de estrutura confirmados ou declarados
-        struct_codes: list[str] = []
-        confirmed = pm.get("estruturas_confirmadas") or []
-        declared = pm.get("declared_codes") or []
-        if confirmed:
-            struct_codes = confirmed[:3]
-        elif pm.get("structure_type"):
-            struct_codes = [pm["structure_type"]]
-        elif declared:
-            struct_codes = declared[:3]
+    for pm in raw:
+        # ── Detecta formato pipeline (tem chave "analysis" ou "placemark") ──────
+        if "analysis" in pm or "placemark" in pm:
+            analysis = pm.get("analysis") or {}
+            placemark = pm.get("placemark") or {}
 
-        poste_type = _extract_poste_type(name)
-        codes_str = " ".join(struct_codes) if struct_codes else ""
-        caption = f"{poste_type} - {codes_str}".strip(" -") if codes_str else poste_type
+            # Nome: do placemark ou do campo direto
+            name = (
+                placemark.get("name")
+                or pm.get("placemark_name")
+                or analysis.get("poste")
+                or "—"
+            )
 
-        if photos:
-            for photo in photos:
-                photo_src = photo if isinstance(photo, str) else (
-                    photo.get("src") or photo.get("path") or photo.get("file_rel_path", "")
-                )
-                structures.append({
-                    "placemark_name": name,
-                    "image_src": photo_src,
-                    "caption": caption,
-                })
-        else:
-            structures.append({
+            # Imagem: campo "image" do item (chave no KMZ)
+            image_key = pm.get("image") or pm.get("image_key") or ""
+
+            # Caption: estruturas confirmadas > structure_type > nome do placemark
+            confirmed = analysis.get("estruturas_confirmadas") or []
+            struct_type = analysis.get("structure_type") or ""
+
+            poste_type = _extract_poste_type(name)
+            if confirmed:
+                codes_str = " ".join(confirmed[:3])
+                caption = f"{poste_type} - {codes_str}"
+            elif struct_type and struct_type != "outro":
+                caption = f"{poste_type} ({struct_type})"
+            else:
+                caption = poste_type
+
+            result.append({
                 "placemark_name": name,
-                "image_src": None,
+                "image_src": image_key,   # chave para busca no KMZ
                 "caption": caption,
             })
 
-    return structures
+        else:
+            # ── Formato legado ────────────────────────────────────────────────
+            name = pm.get("name") or pm.get("placemark_name") or "—"
+            photos = pm.get("photos") or pm.get("images") or []
+
+            confirmed = pm.get("estruturas_confirmadas") or []
+            declared  = pm.get("declared_codes") or []
+            if confirmed:
+                struct_codes = confirmed[:3]
+            elif pm.get("structure_type"):
+                struct_codes = [pm["structure_type"]]
+            elif declared:
+                struct_codes = declared[:3]
+            else:
+                struct_codes = []
+
+            poste_type = _extract_poste_type(name)
+            codes_str  = " ".join(struct_codes)
+            caption    = f"{poste_type} - {codes_str}".strip(" -") if codes_str else poste_type
+
+            if photos:
+                for photo in photos:
+                    photo_src = photo if isinstance(photo, str) else (
+                        photo.get("src") or photo.get("path") or photo.get("file_rel_path", "")
+                    )
+                    result.append({"placemark_name": name, "image_src": photo_src, "caption": caption})
+            else:
+                result.append({"placemark_name": name, "image_src": None, "caption": caption})
+
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────

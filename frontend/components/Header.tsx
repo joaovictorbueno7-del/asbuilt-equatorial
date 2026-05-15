@@ -45,6 +45,12 @@ export default function Header({ user }: { user: { full_name: string; email: str
           >
             Agentes
           </Link>
+          <Link
+            href="/treinar"
+            className="text-sm px-3 py-1.5 rounded-lg border border-grid-line text-slate-300 hover:bg-bg-elevated hover:text-white transition hidden md:inline-block"
+          >
+            Treinar
+          </Link>
           <NotificationBell />
           <LogoutButton />
         </div>

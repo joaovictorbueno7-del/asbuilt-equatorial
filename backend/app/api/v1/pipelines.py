@@ -12,6 +12,12 @@ from app.models import User, PipelineRun, PipelineStatus, AgentRun
 from app.auth.dependencies import get_current_user
 from app.services.pipeline import enqueue_pipeline, PIPELINE_DAG
 
+# Progresso em tempo real do kmz_analyzer (dict em memória, atualizado pelo agente)
+try:
+    from agents.kmz_analyzer import _PROGRESS as _KMZ_PROGRESS
+except ImportError:
+    _KMZ_PROGRESS: dict = {}
+
 router = APIRouter()
 
 MAX_KMZ_BYTES = 100 * 1024 * 1024
@@ -108,6 +114,12 @@ async def get_pipeline(pipeline_id: str, db: AsyncSession = Depends(get_db),
     agents_status = []
     for code, deps in PIPELINE_DAG.items():
         r = runs_by_code.get(code)
+        summary = _summary(r) if r else None
+        # Injeta progresso em tempo real no kmz_analyzer enquanto está running
+        if code == "kmz_analyzer" and r and r.status.value == "running":
+            prog = _KMZ_PROGRESS.get(pipeline_id)
+            if prog and summary is not None:
+                summary["photos_progress"] = prog
         agents_status.append({
             "agent_code": code,
             "depends_on": deps,
@@ -117,7 +129,7 @@ async def get_pipeline(pipeline_id: str, db: AsyncSession = Depends(get_db),
             "started_at": r.started_at.isoformat() if r and r.started_at else None,
             "finished_at": r.finished_at.isoformat() if r and r.finished_at else None,
             "error": r.error_message if r else "",
-            "output_summary": _summary(r) if r else None,
+            "output_summary": summary,
         })
 
     return {

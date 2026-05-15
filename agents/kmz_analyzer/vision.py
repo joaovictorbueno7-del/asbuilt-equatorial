@@ -75,8 +75,9 @@ Regras:
 - nao escreva nada fora do JSON
 """
 
-VISION_MODEL = "claude-sonnet-4-5"
-MAX_DIMENSION = 1568
+VISION_MODEL_FAST = "claude-haiku-4-5"   # análise simples (sem norma) — 3× mais rápido
+VISION_MODEL_NORM = "claude-sonnet-4-5"  # comparação com desenho técnico — mais preciso
+MAX_DIMENSION = 1024  # reduzido de 1568 → carrega mais rápido, qualidade suficiente
 
 _client: AsyncAnthropic | None = None
 
@@ -194,7 +195,7 @@ async def compare_with_norm(
     client = _client_or_raise()
     try:
         msg = await client.messages.create(
-            model=VISION_MODEL,
+            model=VISION_MODEL_NORM,
             max_tokens=1000,
             messages=[{"role": "user", "content": content}],
         )
@@ -281,8 +282,8 @@ async def analyze_image(raw_image: bytes, *, image_label: str = "",
     prompt_text = VISION_PROMPT + _format_examples(examples or [])
     try:
         msg = await client.messages.create(
-            model=VISION_MODEL,
-            max_tokens=600,
+            model=VISION_MODEL_FAST,  # Haiku: mais rápido para análise simples
+            max_tokens=400,           # resposta mais curta → menos latência
             messages=[{
                 "role": "user",
                 "content": [

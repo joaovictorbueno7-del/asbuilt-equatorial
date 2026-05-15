@@ -18,8 +18,12 @@ from agents.registry import register
 from .parser import parse_kmz
 from .vision import analyze_image, compare_with_norm
 
-MAX_PARALLEL_VISION = 3  # conservador para rate limit
+MAX_PARALLEL_VISION = 8  # Anthropic suporta bem mais concorrência
 NT00022_ID = "d06b92ba-37c9-4c45-8bf1-e41633674559"
+
+# Rastreador de progresso em memória — chave = pipeline_id
+# Lido pela API GET /pipelines/{id} para mostrar barra em tempo real
+_PROGRESS: dict[str, dict] = {}  # {pipeline_id: {current, total}}
 
 
 def _try_import_norm_lookup():
@@ -53,6 +57,7 @@ class KMZAnalyzerAgent(BaseAgent):
     async def run(self, payload, *, context=None):
         kmz_path = payload["kmz_path"]
         examples = (context or {}).get("few_shot_examples", []) or []
+        pipeline_id = (context or {}).get("pipeline_id", "")
         enrich_with_norm = _try_import_norm_lookup()
 
         logger.info(f"[kmz_analyzer] start kmz={kmz_path} few_shot={len(examples)} "
@@ -71,21 +76,37 @@ class KMZAnalyzerAgent(BaseAgent):
                 confidence=0.0, needs_human=True, notes="empty KMZ",
             )
 
-        # Constrói pares (placemark_idx, image_key)
+        # Constrói pares (placemark_idx, image_key) — sem duplicatas por bytes
+        MAX_FOTOS = 60  # limite por análise: acima disso a qualidade cai e demora demais
         pairs: list[tuple[int | None, str]] = []
+        seen_fp: set[bytes] = set()
         for i, pm in enumerate(placemarks):
             for img_key in pm["images"]:
+                if len(pairs) >= MAX_FOTOS:
+                    break
+                data = images.get(img_key, b"")
+                fp = data[:128]
+                if fp and fp in seen_fp:
+                    logger.debug(f"[kmz_analyzer] skip duplicata {img_key}")
+                    continue
+                if fp:
+                    seen_fp.add(fp)
                 pairs.append((i, img_key))
 
-        # Fallback: sem referências → analisa todas as imagens
+        # Fallback: sem referências → analisa todas as imagens sem duplicatas
         if not pairs and images:
-            seen: set[bytes] = set()
             for img_key, data in images.items():
-                fp = data[:64]
-                if fp in seen:
+                if len(pairs) >= MAX_FOTOS:
+                    break
+                fp = data[:128]
+                if fp in seen_fp:
                     continue
-                seen.add(fp)
+                seen_fp.add(fp)
                 pairs.append((None, img_key))
+
+        total_orig = sum(len(pm["images"]) for pm in placemarks) or len(images)
+        logger.info(f"[kmz_analyzer] {len(pairs)} fotos selecionadas "
+                    f"(de {total_orig} totais, cap={MAX_FOTOS})")
 
         sem = asyncio.Semaphore(MAX_PARALLEL_VISION)
 
@@ -143,10 +164,34 @@ class KMZAnalyzerAgent(BaseAgent):
                     logger.exception(f"[kmz_analyzer] {img_key} vision failed: {e}")
                     return _empty_result(img_key, f"vision error: {e}")
 
-        logger.info(f"[kmz_analyzer] analisando {len(pairs)} imagens "
+        total_fotos = len(pairs)
+        logger.info(f"[kmz_analyzer] analisando {total_fotos} imagens "
                     f"(max {MAX_PARALLEL_VISION} paralelas)")
-        analyses = await asyncio.gather(*[_analyze_one(pm_idx, k) for pm_idx, k in pairs])
-        logger.info(f"[kmz_analyzer] todas as imagens analisadas")
+
+        # Inicializa rastreador de progresso
+        if pipeline_id:
+            _PROGRESS[pipeline_id] = {"current": 0, "total": total_fotos}
+
+        # Wrapper que incrementa o contador após cada foto concluída
+        completed_count = 0
+
+        async def _analyze_with_progress(pm_idx: int | None, img_key: str) -> dict:
+            nonlocal completed_count
+            result = await _analyze_one(pm_idx, img_key)
+            completed_count += 1
+            if pipeline_id:
+                _PROGRESS[pipeline_id] = {"current": completed_count, "total": total_fotos}
+            return result
+
+        analyses = await asyncio.gather(
+            *[_analyze_with_progress(pm_idx, k) for pm_idx, k in pairs]
+        )
+
+        # Limpa o progresso (análise concluída)
+        if pipeline_id:
+            _PROGRESS.pop(pipeline_id, None)
+
+        logger.info(f"[kmz_analyzer] todas as {total_fotos} imagens analisadas")
 
         # Agrega resultados
         structures: list[dict] = []

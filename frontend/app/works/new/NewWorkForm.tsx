@@ -12,9 +12,17 @@ const TIPOS = [
 
 type Stage = "form" | "uploading" | "processing" | "done" | "error";
 
+type PhotosProgress = { current: number; total: number };
+
 type WorkStatus = {
   status: string;
   output?: { image_count?: number; placemark_count?: number; quality_score?: number };
+  // Progresso do kmz_analyzer em tempo real (via agents[].output_summary.photos_progress)
+  agents?: Array<{
+    agent_code: string;
+    status: string;
+    output_summary?: { photos_progress?: PhotosProgress; image_count?: number } | null;
+  }>;
 };
 
 export default function NewWorkForm() {
@@ -221,16 +229,16 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 function ProgressView({ stage, progress, fileName }: { stage: Stage; progress: WorkStatus | null; fileName: string }) {
+  // Pega progresso do kmz_analyzer em tempo real
+  const kmzAgent = progress?.agents?.find(a => a.agent_code === "kmz_analyzer");
+  const photoProg: PhotosProgress | null =
+    kmzAgent?.output_summary?.photos_progress ?? null;
+  const photosDone = progress?.status === "completed" || progress?.status === "needs_human";
+
   const steps = [
     { key: "upload", label: "KMZ recebido", done: true },
     { key: "extract", label: "Extraindo fotos e coordenadas", done: !!progress },
-    {
-      key: "analyze",
-      label: progress?.output?.image_count
-        ? `Analisando ${progress.output.image_count} fotos com Claude Vision`
-        : "Analisando fotos com Claude Vision",
-      done: progress?.status === "completed" || progress?.status === "needs_human",
-    },
+    { key: "analyze", label: "Analisando fotos com Claude Vision", done: photosDone },
     { key: "validate", label: "Validando padrões técnicos", done: stage === "done" },
     { key: "done", label: "Análise concluída", done: stage === "done" },
   ];
@@ -242,21 +250,60 @@ function ProgressView({ stage, progress, fileName }: { stage: Stage; progress: W
         <div className="text-xs uppercase tracking-wider text-slate-500 mb-1">Processando</div>
         <div className="font-semibold text-white truncate">{fileName}</div>
       </div>
-      <div className="space-y-3">
+      <div className="space-y-4">
         {steps.map((s, i) => {
           const active = !s.done && (i === 0 || steps[i - 1].done);
+          const isVision = s.key === "analyze";
+          const pct = photoProg && photoProg.total > 0
+            ? Math.round((photoProg.current / photoProg.total) * 100)
+            : null;
+
           return (
-            <div key={s.key} className="flex items-center gap-3">
-              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${
-                s.done ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
-                : active ? "bg-accent/20 text-accent border border-accent/40 animate-pulse"
-                : "bg-bg-elevated text-slate-600 border border-grid-line"
-              }`}>
-                {s.done ? "✓" : active ? "●" : "○"}
+            <div key={s.key}>
+              <div className="flex items-center gap-3">
+                <div className={`w-6 h-6 rounded-full flex-shrink-0 flex items-center justify-center text-xs ${
+                  s.done ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                  : active ? "bg-accent/20 text-accent border border-accent/40 animate-pulse"
+                  : "bg-bg-elevated text-slate-600 border border-grid-line"
+                }`}>
+                  {s.done ? "✓" : active ? "●" : "○"}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className={s.done ? "text-slate-200" : active ? "text-white font-medium" : "text-slate-600"}>
+                      {s.label}
+                      {isVision && photoProg && !s.done && (
+                        <span className="ml-2 text-xs text-slate-400 font-normal">
+                          {photoProg.current}/{photoProg.total} fotos
+                        </span>
+                      )}
+                      {isVision && s.done && kmzAgent?.output_summary?.image_count && (
+                        <span className="ml-2 text-xs text-slate-400 font-normal">
+                          {kmzAgent.output_summary.image_count} fotos
+                        </span>
+                      )}
+                    </span>
+                    {isVision && pct !== null && !s.done && (
+                      <span className="text-xs font-mono text-accent flex-shrink-0">{pct}%</span>
+                    )}
+                  </div>
+                  {/* Barra de progresso — só aparece quando Vision está ativa */}
+                  {isVision && active && photoProg && photoProg.total > 0 && !s.done && (
+                    <div className="mt-1.5 h-1.5 bg-bg-elevated rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-accent rounded-full transition-all duration-300"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  )}
+                  {/* Barra indeterminada quando Vision está ativa mas progresso ainda não chegou */}
+                  {isVision && active && !photoProg && (
+                    <div className="mt-1.5 h-1.5 bg-bg-elevated rounded-full overflow-hidden">
+                      <div className="h-full w-1/3 bg-accent/60 rounded-full animate-pulse" />
+                    </div>
+                  )}
+                </div>
               </div>
-              <span className={s.done ? "text-slate-200" : active ? "text-white font-medium" : "text-slate-600"}>
-                {s.label}
-              </span>
             </div>
           );
         })}
