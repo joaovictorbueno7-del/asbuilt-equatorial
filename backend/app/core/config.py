@@ -33,6 +33,10 @@ _ENV_FILE = _find_env_file()
 # Necessário no Windows quando o caminho contém caracteres especiais (ã, ç…)
 # que podem fazer o pydantic-settings falhar ao ler o arquivo silenciosamente.
 def _load_env_manually(env_path: str) -> None:
+    """Lê o .env e injeta no os.environ.
+    Sobrescreve variáveis vazias (Windows pode ter vars de ambiente definidas
+    como string vazia, o que bloquearia a leitura do .env).
+    """
     try:
         with open(env_path, encoding="utf-8") as f:
             for raw_line in f:
@@ -42,7 +46,8 @@ def _load_env_manually(env_path: str) -> None:
                 key, _, value = line.partition("=")
                 key = key.strip()
                 value = value.strip().strip('"').strip("'")
-                if key and key not in os.environ:   # não sobrescreve vars já definidas
+                # Sobrescreve se: variável não existe OU existe mas está vazia
+                if key and not os.environ.get(key, ""):
                     os.environ[key] = value
     except Exception:
         pass
